@@ -21,6 +21,7 @@ class LLMServiceConfig:
     timeout_sec: int
     api_key: str | None = None
     model: str | None = None
+    max_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ def _get_config() -> LLMServiceConfig:
         timeout_sec=settings.llm_service_timeout_sec,
         api_key=settings.llm_service_api_key,
         model=settings.llm_service_model,
+        max_tokens=settings.llm_max_tokens,
     )
 
 
@@ -92,6 +94,8 @@ def _chat_completion(system_prompt: str, user_prompt: str) -> str:
         ],
         "temperature": 0,
     }
+    if config.max_tokens is not None:
+        payload["max_tokens"] = config.max_tokens
     data = _post_json("/chat/completions", payload)
     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
     if not isinstance(content, str):

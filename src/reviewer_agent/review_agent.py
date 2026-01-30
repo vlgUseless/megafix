@@ -6,13 +6,9 @@ from github.PullRequest import PullRequest
 from github.WorkflowRun import WorkflowRun
 
 from agent_core.llm import LLMServiceError, summarize_review
+from agent_core.settings import get_settings
 
 LOG = logging.getLogger(__name__)
-
-_MAX_DIFF_CHARS = 120_000
-_MAX_PATCH_CHARS = 6_000
-_MAX_LOG_CHARS = 4_000
-
 
 class FailedLogSummary(TypedDict):
     job_id: int
@@ -95,6 +91,9 @@ def run_review_agent(
 
 
 def _build_pr_diff(files: list[Any]) -> str:
+    settings = get_settings()
+    max_diff_chars = settings.review_max_diff_chars
+    max_patch_chars = settings.review_max_patch_chars
     chunks: list[str] = []
     total = 0
     for file in files:
@@ -111,10 +110,10 @@ def _build_pr_diff(files: list[Any]) -> str:
         patch = getattr(file, "patch", None) or ""
         if not patch:
             patch = "# patch unavailable (binary or too large)\n"
-        if len(patch) > _MAX_PATCH_CHARS:
-            patch = patch[:_MAX_PATCH_CHARS] + "\n# ...patch truncated\n"
+        if len(patch) > max_patch_chars:
+            patch = patch[:max_patch_chars] + "\n# ...patch truncated\n"
         chunk = f"{header}{patch}\n"
-        if total + len(chunk) > _MAX_DIFF_CHARS:
+        if total + len(chunk) > max_diff_chars:
             chunks.append("# ...diff truncated due to size\n")
             break
         chunks.append(chunk)
@@ -126,6 +125,8 @@ def _build_ci_summary(
     workflow_runs: list[WorkflowRun],
     failed_job_logs: dict[int, str | None],
 ) -> dict[str, Any]:
+    settings = get_settings()
+    max_log_chars = settings.review_max_log_chars
     runs_summary = []
     for run in workflow_runs:
         runs_summary.append(
@@ -145,12 +146,12 @@ def _build_ci_summary(
                 {"job_id": job_id, "log_excerpt": None, "truncated": False}
             )
             continue
-        excerpt = log[:_MAX_LOG_CHARS]
+        excerpt = log[:max_log_chars]
         failed_logs_summary.append(
             {
                 "job_id": job_id,
                 "log_excerpt": excerpt,
-                "truncated": len(log) > _MAX_LOG_CHARS,
+                "truncated": len(log) > max_log_chars,
             }
         )
 

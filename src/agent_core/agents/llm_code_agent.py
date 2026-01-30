@@ -12,16 +12,10 @@ from agent_core.settings import get_settings
 
 LOG = logging.getLogger(__name__)
 
-_MAX_RELEVANT_FILES = 12
-_MAX_FILE_BYTES = 50_000
-_MAX_TREE_ENTRIES = 5_000
-
-
 def run_issue(issue: IssueContext, repo_path: Path) -> CodeAgentResult:
     repo_context = _build_repo_context(issue, repo_path)
     changes = generate_file_changes(issue, repo_context)
     _apply_file_changes(repo_path, changes)
-    _run_fast_checks(repo_path)
     return _build_pr_result(issue)
 
 
@@ -40,16 +34,20 @@ def _build_repo_context(issue: IssueContext, repo_path: Path) -> dict[str, objec
 
 
 def _repo_tree(repo_path: Path) -> tuple[list[str], int, bool]:
+    settings = get_settings()
+    max_tree_entries = settings.llm_max_tree_entries
     cmd = ["git", "-C", str(repo_path), "ls-files"]
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     total = len(files)
-    if len(files) > _MAX_TREE_ENTRIES:
-        return files[:_MAX_TREE_ENTRIES], total, True
+    if len(files) > max_tree_entries:
+        return files[:max_tree_entries], total, True
     return files, total, False
 
 
 def _select_relevant_files(issue: IssueContext, tree: Iterable[str]) -> list[str]:
+    settings = get_settings()
+    max_relevant_files = settings.llm_max_relevant_files
     tree_list = list(tree)
     tree_set = set(tree_list)
     candidates = _extract_path_candidates(issue)
@@ -57,7 +55,7 @@ def _select_relevant_files(issue: IssueContext, tree: Iterable[str]) -> list[str
     for candidate in candidates:
         if candidate in tree_set and candidate not in selected:
             selected.append(candidate)
-            if len(selected) >= _MAX_RELEVANT_FILES:
+            if len(selected) >= max_relevant_files:
                 return selected
 
     basenames: dict[str, list[str]] = {}
@@ -71,7 +69,7 @@ def _select_relevant_files(issue: IssueContext, tree: Iterable[str]) -> list[str
         for path in basenames.get(Path(candidate).name, []):
             if path not in selected:
                 selected.append(path)
-                if len(selected) >= _MAX_RELEVANT_FILES:
+                if len(selected) >= max_relevant_files:
                     return selected
 
     if not selected and "README.md" in tree_set:
@@ -97,13 +95,15 @@ def _extract_path_candidates(issue: IssueContext) -> list[str]:
 
 
 def _read_files(repo_path: Path, paths: Iterable[str]) -> dict[str, str]:
+    settings = get_settings()
+    max_file_bytes = settings.llm_max_file_bytes
     payload: dict[str, str] = {}
     for rel_path in paths:
         file_path = repo_path / rel_path
         if not file_path.exists() or not file_path.is_file():
             continue
         try:
-            if file_path.stat().st_size > _MAX_FILE_BYTES:
+            if file_path.stat().st_size > max_file_bytes:
                 continue
             payload[rel_path] = file_path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
@@ -140,19 +140,6 @@ def _apply_file_changes(repo_path: Path, changes: Iterable[FileChange]) -> None:
 
     if applied == 0:
         raise ValueError("LLM did not apply any file changes.")
-
-
-def _run_fast_checks(repo_path: Path) -> None:
-    settings = get_settings()
-    if not settings.llm_check_cmd:
-        return
-    LOG.info("Running fast checks: %s", settings.llm_check_cmd)
-    subprocess.run(
-        settings.llm_check_cmd,
-        cwd=str(repo_path),
-        shell=True,
-        check=True,
-    )
 
 
 def _build_pr_result(issue: IssueContext) -> CodeAgentResult:

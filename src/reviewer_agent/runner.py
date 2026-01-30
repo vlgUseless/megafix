@@ -25,7 +25,6 @@ from reviewer_agent.actions_logs import (
 from reviewer_agent.review_agent import review_pull_request
 
 LOG = logging.getLogger(__name__)
-_MAX_RERUN_ATTEMPTS = 5
 
 
 def _resolve_pr_number(
@@ -424,8 +423,10 @@ def _maybe_rerun_code_agent(
     installation_id: int,
     review_key: str | None,
 ) -> tuple[bool, int | None]:
+    settings = get_settings()
+    max_attempts = settings.review_rerun_max_attempts
     should_rerun, attempts = _register_rerun_attempt(
-        repo_full_name, issue_number, _MAX_RERUN_ATTEMPTS
+        repo_full_name, issue_number, max_attempts
     )
     if not should_rerun:
         LOG.info(
@@ -433,11 +434,10 @@ def _maybe_rerun_code_agent(
             repo_full_name,
             issue_number,
             attempts,
-            _MAX_RERUN_ATTEMPTS,
+            max_attempts,
         )
         return False, attempts
 
-    settings = get_settings()
     redis_conn = Redis.from_url(settings.redis_url)
     q = Queue(settings.rq_queue, connection=redis_conn)
     delivery_id = f"review-rerun:{review_key or 'manual'}:{attempts}"
@@ -456,6 +456,6 @@ def _maybe_rerun_code_agent(
         repo_full_name,
         issue_number,
         attempts,
-        _MAX_RERUN_ATTEMPTS,
+        max_attempts,
     )
     return True, attempts

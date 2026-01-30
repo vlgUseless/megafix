@@ -24,6 +24,19 @@ def _read_int(name: str, default: int) -> int:
         raise ValueError(f"Invalid integer for {name}: {raw}") from exc
 
 
+def _read_optional_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid integer for {name}: {raw}") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     github_app_id: str | None
@@ -48,7 +61,14 @@ class Settings:
     llm_service_api_key: str | None
     llm_service_timeout_sec: int
     llm_service_model: str | None
-    llm_check_cmd: str | None
+    llm_max_tokens: int | None
+    llm_max_relevant_files: int
+    llm_max_file_bytes: int
+    llm_max_tree_entries: int
+    review_max_diff_chars: int
+    review_max_patch_chars: int
+    review_max_log_chars: int
+    review_rerun_max_attempts: int
 
 
 @lru_cache(maxsize=1)
@@ -78,7 +98,14 @@ def get_settings() -> Settings:
         or os.getenv("OPENAI_API_KEY"),
         llm_service_timeout_sec=_read_int("LLM_SERVICE_TIMEOUT_SEC", 60),
         llm_service_model=os.getenv("LLM_SERVICE_MODEL"),
-        llm_check_cmd=os.getenv("LLM_CHECK_CMD"),
+        llm_max_tokens=_read_optional_int("LLM_MAX_TOKENS"),
+        llm_max_relevant_files=_read_int("LLM_MAX_RELEVANT_FILES", 12),
+        llm_max_file_bytes=_read_int("LLM_MAX_FILE_BYTES", 50_000),
+        llm_max_tree_entries=_read_int("LLM_MAX_TREE_ENTRIES", 5_000),
+        review_max_diff_chars=_read_int("REVIEW_MAX_DIFF_CHARS", 120_000),
+        review_max_patch_chars=_read_int("REVIEW_MAX_PATCH_CHARS", 6_000),
+        review_max_log_chars=_read_int("REVIEW_MAX_LOG_CHARS", 4_000),
+        review_rerun_max_attempts=_read_int("REVIEW_RERUN_MAX_ATTEMPTS", 5),
     )
 
 

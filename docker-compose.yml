@@ -1,0 +1,59 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  web:
+    build: .
+    command: ["uvicorn", "webhook_server.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      REVIEW_STATE_DB: /data/review_state.db
+      AGENT_WORKDIR: /workdir
+    volumes:
+      - review_state:/data
+      - agent_workdir:/workdir
+      # Optional: mount private key if using file path
+      # - ./path/to/private-key.pem:/run/secrets/github_private_key.pem:ro
+    depends_on:
+      - redis
+    ports:
+      - "8000:8000"
+
+  worker:
+    build: .
+    command: ["sh", "-c", "rq worker --url \"$${REDIS_URL}\" \"$${RQ_QUEUE:-default}\""]
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      REVIEW_STATE_DB: /data/review_state.db
+      AGENT_WORKDIR: /workdir
+    volumes:
+      - review_state:/data
+      - agent_workdir:/workdir
+      # Optional: mount private key if using file path
+      # - ./path/to/private-key.pem:/run/secrets/github_private_key.pem:ro
+    depends_on:
+      - redis
+
+  smee:
+    image: amplifysecurity/smee-client:latest
+    profiles: ["dev"]
+    environment:
+      SMEE_URL: ${SMEE_URL}
+    command: ["smee", "--url", "${SMEE_URL}", "--target", "http://web:8000/webhook"]
+    depends_on:
+      - web
+
+volumes:
+  redis_data:
+  review_state:
+  agent_workdir:

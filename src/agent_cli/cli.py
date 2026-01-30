@@ -40,8 +40,6 @@ def review_pr(pr_url: str = typer.Option(..., "--pr-url")) -> None:
     gh = Github(token)
     repository = gh.get_repo(f"{owner}/{repo}")
     pull_request = repository.get_pull(pr_number)
-    # NOTE: This is the PR "issue" object; later we should resolve the source Issue
-    # from PR body (e.g., "Closes #N") or linked issues.
     issue = repository.get_issue(pr_number)
 
     workflow_runs, failed_job_logs = get_workflow_runs_and_logs(

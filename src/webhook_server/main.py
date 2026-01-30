@@ -36,7 +36,7 @@ def verify_signature(secret: str, body: bytes, signature_header: str | None) -> 
 
 
 def acquire_delivery_lock(delivery_id: str) -> bool:
-    # SET key value NX EX ttl — рекомендуемый паттерн атомарного дедуп/локов
+    # SET key value NX EX ttl — атомарный паттерн дедуп/локов
     key = f"delivery:{delivery_id}"
     return bool(redis_conn.set(key, "1", nx=True, ex=settings.delivery_ttl_sec))
 

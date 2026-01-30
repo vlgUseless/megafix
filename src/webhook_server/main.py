@@ -151,6 +151,8 @@ async def webhook(
         repo = payload["repository"]["full_name"]
         installation_id = payload["installation"]["id"]
         run = payload.get("workflow_run", {})
+        if run.get("event") != "pull_request" or not run.get("pull_requests"):
+            return {"ignored": True}
         run_id = run.get("id")
         head_sha = run.get("head_sha")
         conclusion = run.get("conclusion")

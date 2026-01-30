@@ -10,6 +10,7 @@ from agent_core.settings import get_settings
 
 LOG = logging.getLogger(__name__)
 
+
 class FailedLogSummary(TypedDict):
     job_id: int
     log_excerpt: str | None

@@ -4,6 +4,7 @@ import logging
 import re
 import subprocess
 from collections.abc import Iterable
+from difflib import unified_diff
 from pathlib import Path
 
 from agent_core.agents.code_agent_base import CodeAgentResult, IssueContext
@@ -11,6 +12,7 @@ from agent_core.llm import FileChange, generate_file_changes
 from agent_core.settings import get_settings
 
 LOG = logging.getLogger(__name__)
+
 
 def run_issue(issue: IssueContext, repo_path: Path) -> CodeAgentResult:
     repo_context = _build_repo_context(issue, repo_path)
@@ -112,6 +114,10 @@ def _read_files(repo_path: Path, paths: Iterable[str]) -> dict[str, str]:
 
 
 def _apply_file_changes(repo_path: Path, changes: Iterable[FileChange]) -> None:
+    settings = get_settings()
+    max_deleted_lines = settings.llm_max_deleted_lines
+    max_deleted_ratio = settings.llm_max_deleted_ratio
+
     repo_root = repo_path.resolve()
     applied = 0
     for change in changes:
@@ -135,6 +141,31 @@ def _apply_file_changes(repo_path: Path, changes: Iterable[FileChange]) -> None:
 
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         content = change.content or ""
+
+        if abs_path.exists():
+            old_text = abs_path.read_text(encoding="utf-8", errors="replace")
+            old_lines = old_text.splitlines()
+            new_lines = content.splitlines()
+            deleted_lines = 0
+            for line in unified_diff(old_lines, new_lines, lineterm=""):
+                if line.startswith("---") or line.startswith("+++"):
+                    continue
+                if line.startswith("-"):
+                    deleted_lines += 1
+
+            if deleted_lines > max_deleted_lines:
+                raise ValueError(
+                    f"Refusing change for {change.path}: deleted {deleted_lines} lines "
+                    f"(limit {max_deleted_lines})."
+                )
+            if old_lines:
+                deleted_ratio = deleted_lines / len(old_lines)
+                if deleted_ratio > max_deleted_ratio:
+                    raise ValueError(
+                        f"Refusing change for {change.path}: deleted {deleted_ratio:.0%} "
+                        f"of lines (limit {max_deleted_ratio:.0%})."
+                    )
+
         abs_path.write_text(content, encoding="utf-8")
         applied += 1
 

@@ -37,6 +37,17 @@ def _read_optional_int(name: str) -> int | None:
     return value
 
 
+def _read_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid float for {name}: {raw}") from exc
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     github_app_id: str | None
@@ -65,6 +76,8 @@ class Settings:
     llm_max_relevant_files: int
     llm_max_file_bytes: int
     llm_max_tree_entries: int
+    llm_max_deleted_lines: int
+    llm_max_deleted_ratio: float
     review_max_diff_chars: int
     review_max_patch_chars: int
     review_max_log_chars: int
@@ -102,6 +115,8 @@ def get_settings() -> Settings:
         llm_max_relevant_files=_read_int("LLM_MAX_RELEVANT_FILES", 12),
         llm_max_file_bytes=_read_int("LLM_MAX_FILE_BYTES", 50_000),
         llm_max_tree_entries=_read_int("LLM_MAX_TREE_ENTRIES", 5_000),
+        llm_max_deleted_lines=_read_int("LLM_MAX_DELETED_LINES", 200),
+        llm_max_deleted_ratio=_read_float("LLM_MAX_DELETED_RATIO", 0.3),
         review_max_diff_chars=_read_int("REVIEW_MAX_DIFF_CHARS", 120_000),
         review_max_patch_chars=_read_int("REVIEW_MAX_PATCH_CHARS", 6_000),
         review_max_log_chars=_read_int("REVIEW_MAX_LOG_CHARS", 4_000),

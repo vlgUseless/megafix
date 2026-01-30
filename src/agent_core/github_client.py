@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ import requests
 from agent_core.settings import get_settings, load_private_key
 
 GITHUB_API = "https://api.github.com"
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,20 @@ def github_request(
         params=params,
         timeout=30,
     )
+
+    if response.status_code >= 400:
+        # GitHub почти всегда отдаёт JSON с message + errors
+        try:
+            err = response.json()
+        except Exception:
+            err = response.text
+        LOG.error(
+            "GitHub API error %s %s -> %s; response=%r",
+            method,
+            path,
+            response.status_code,
+            err,
+        )
     response.raise_for_status()
     return response
 
@@ -76,6 +92,20 @@ def get_installation_token(installation_id: int) -> str:
     return cast(str, token_value)
 
 
+def get_installation_id(owner: str, repo: str) -> int:
+    settings = get_settings()
+    if not settings.github_app_id:
+        raise RuntimeError("Missing GITHUB_APP_ID.")
+    private_key_pem = load_private_key(settings)
+    app_jwt = make_app_jwt(settings.github_app_id, private_key_pem)
+    response = github_request(
+        "GET",
+        f"/repos/{owner}/{repo}/installation",
+        token=app_jwt,
+    )
+    return cast(int, response.json()["id"])
+
+
 def get_repo_info(token: str, full_name: str) -> RepoInfo:
     response = github_request("GET", f"/repos/{full_name}", token=token)
     payload = cast(Mapping[str, Any], response.json())
@@ -92,6 +122,17 @@ def get_issue(token: str, repo_full_name: str, issue_number: int) -> Mapping[str
         "GET", f"/repos/{repo_full_name}/issues/{issue_number}", token=token
     )
     return cast(Mapping[str, Any], response.json())
+
+
+def list_pull_requests_for_commit(
+    token: str, repo_full_name: str, sha: str
+) -> list[dict[str, Any]]:
+    response = github_request(
+        "GET",
+        f"/repos/{repo_full_name}/commits/{sha}/pulls",
+        token=token,
+    )
+    return cast(list[dict[str, Any]], response.json())
 
 
 def find_open_pr(token: str, repo_info: RepoInfo, branch: str) -> dict[str, Any] | None:
@@ -172,3 +213,24 @@ def comment_issue(
         token=token,
         json_body={"body": message},
     )
+
+
+def create_pull_request_review(
+    token: str,
+    repo_full_name: str,
+    pr_number: int,
+    *,
+    body: str,
+    event: str = "COMMENT",
+    commit_id: str | None = None,
+) -> Mapping[str, Any]:
+    payload: dict[str, Any] = {"body": body, "event": event}
+    if commit_id:
+        payload["commit_id"] = commit_id
+    response = github_request(
+        "POST",
+        f"/repos/{repo_full_name}/pulls/{pr_number}/reviews",
+        token=token,
+        json_body=payload,
+    )
+    return cast(Mapping[str, Any], response.json())

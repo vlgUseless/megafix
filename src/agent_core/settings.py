@@ -43,6 +43,12 @@ class Settings:
     github_app_name: str | None
     log_level: str
     apply_cmd: str | None
+    review_state_db: Path
+    llm_service_url: str | None
+    llm_service_api_key: str | None
+    llm_service_timeout_sec: int
+    llm_service_model: str | None
+    llm_check_cmd: str | None
 
 
 @lru_cache(maxsize=1)
@@ -66,6 +72,13 @@ def get_settings() -> Settings:
         github_app_name=os.getenv("GITHUB_APP_NAME"),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         apply_cmd=os.getenv("AGENT_APPLY_CMD"),
+        review_state_db=_read_path("REVIEW_STATE_DB") or Path("review_state.db"),
+        llm_service_url=os.getenv("LLM_SERVICE_URL"),
+        llm_service_api_key=os.getenv("LLM_SERVICE_API_KEY")
+        or os.getenv("OPENAI_API_KEY"),
+        llm_service_timeout_sec=_read_int("LLM_SERVICE_TIMEOUT_SEC", 60),
+        llm_service_model=os.getenv("LLM_SERVICE_MODEL"),
+        llm_check_cmd=os.getenv("LLM_CHECK_CMD"),
     )
 
 

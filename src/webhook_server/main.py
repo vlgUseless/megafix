@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import re
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from redis import Redis
@@ -8,6 +9,7 @@ from rq import Queue
 
 from agent_core.runner import handle_issue_opened_job
 from agent_core.settings import get_settings
+from reviewer_agent.runner import handle_review_job
 
 app = FastAPI()
 
@@ -39,6 +41,52 @@ def acquire_delivery_lock(delivery_id: str) -> bool:
     return bool(redis_conn.set(key, "1", nx=True, ex=settings.delivery_ttl_sec))
 
 
+def _enqueue_review_job(
+    repo: str,
+    installation_id: int,
+    *,
+    pr_number: int | None = None,
+    head_sha: str | None = None,
+    run_id: int | None = None,
+    conclusion: str | None = None,
+    base_branch: str | None = None,
+    delivery_id: str | None = None,
+) -> None:
+    q.enqueue(
+        handle_review_job,
+        repo,
+        installation_id,
+        pr_number=pr_number,
+        head_sha=head_sha,
+        run_id=run_id,
+        conclusion=conclusion,
+        base_branch=base_branch,
+        delivery_id=delivery_id,
+        job_timeout=settings.rq_job_timeout,
+        result_ttl=settings.rq_result_ttl,
+        failure_ttl=settings.rq_failure_ttl,
+    )
+
+
+def _enqueue_issue_job(
+    repo: str,
+    issue_number: int,
+    installation_id: int,
+    *,
+    delivery_id: str | None = None,
+) -> None:
+    q.enqueue(
+        handle_issue_opened_job,
+        repo,
+        issue_number,
+        installation_id,
+        delivery_id,
+        job_timeout=settings.rq_job_timeout,
+        result_ttl=settings.rq_result_ttl,
+        failure_ttl=settings.rq_failure_ttl,
+    )
+
+
 @app.post("/webhook")
 async def webhook(
     request: Request,
@@ -54,24 +102,73 @@ async def webhook(
     if x_github_event == "ping":
         return {"ok": True}
 
-    if x_github_event == "issues" and payload.get("action") == "opened":
+    if x_github_delivery and not acquire_delivery_lock(x_github_delivery):
+        # уже видели эту доставку
+        return Response(status_code=202)
+
+    if x_github_event == "issues":
+        action = payload.get("action")
         repo = payload["repository"]["full_name"]
         issue_number = payload["issue"]["number"]
         installation_id = payload["installation"]["id"]
+        if action in {"opened", "reopened"}:
+            _enqueue_issue_job(
+                repo,
+                issue_number,
+                installation_id,
+                delivery_id=x_github_delivery or None,
+            )
+            return Response(status_code=202)
+        if action == "edited":
+            changes = payload.get("changes", {})
+            if "title" in changes or "body" in changes:
+                _enqueue_issue_job(
+                    repo,
+                    issue_number,
+                    installation_id,
+                    delivery_id=x_github_delivery or None,
+                )
+                return Response(status_code=202)
 
-        if x_github_delivery and not acquire_delivery_lock(x_github_delivery):
-            # уже видели эту доставку
+    if x_github_event == "issue_comment" and payload.get("action") == "created":
+        issue = payload.get("issue", {})
+        if issue.get("pull_request"):
+            return {"ignored": True}
+        comment_body = (payload.get("comment", {}) or {}).get("body") or ""
+        if re.search(r"(?i)\\B/megafix\\s+(rerun|run)\\b", comment_body):
+            repo = payload["repository"]["full_name"]
+            issue_number = issue["number"]
+            installation_id = payload["installation"]["id"]
+            _enqueue_issue_job(
+                repo,
+                issue_number,
+                installation_id,
+                delivery_id=x_github_delivery or None,
+            )
             return Response(status_code=202)
 
-        q.enqueue(
-            handle_issue_opened_job,
+    if x_github_event == "workflow_run" and payload.get("action") == "completed":
+        repo = payload["repository"]["full_name"]
+        installation_id = payload["installation"]["id"]
+        run = payload.get("workflow_run", {})
+        run_id = run.get("id")
+        head_sha = run.get("head_sha")
+        conclusion = run.get("conclusion")
+        pull_requests = run.get("pull_requests", [])
+        pr_number = pull_requests[0]["number"] if pull_requests else None
+        base_branch = (
+            pull_requests[0].get("base", {}).get("ref") if pull_requests else None
+        )
+
+        _enqueue_review_job(
             repo,
-            issue_number,
             installation_id,
-            x_github_delivery or None,
-            job_timeout=settings.rq_job_timeout,
-            result_ttl=settings.rq_result_ttl,
-            failure_ttl=settings.rq_failure_ttl,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            run_id=run_id,
+            conclusion=conclusion,
+            base_branch=base_branch,
+            delivery_id=x_github_delivery or None,
         )
         return Response(status_code=202)
 

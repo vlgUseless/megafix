@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from agent_core.agents import dummy_code_agent, llm_code_agent
+from agent_core.agents import llm_code_agent
 from agent_core.agents.code_agent_base import CodeAgentResult, IssueContext
 from agent_core.git_ops import commit_if_needed, prepare_repo, push_branch
 from agent_core.github_client import (
@@ -27,18 +27,16 @@ LOG = logging.getLogger(__name__)
 def _apply_changes(
     repo_path: Path, issue: IssueContext, settings_apply_cmd: str | None
 ) -> CodeAgentResult:
+    settings = get_settings()
+    if not settings.llm_service_url:
+        raise RuntimeError("LLM_SERVICE_URL is not configured. LLM agent is required.")
+    result = llm_code_agent.run_issue(issue, repo_path)
+
     if settings_apply_cmd:
         LOG.info("Running apply command: %s", settings_apply_cmd)
         subprocess.run(settings_apply_cmd, cwd=str(repo_path), shell=True, check=True)
-        title = f"[Agent] Fix issue #{issue.number}"
-        body = f"Closes #{issue.number}\n\nAutomated changes by GitHub App."
-        return CodeAgentResult(pr_title=title, pr_body=body)
 
-    settings = get_settings()
-    if settings.llm_service_url:
-        return llm_code_agent.run_issue(issue, repo_path)
-
-    return dummy_code_agent.run_issue(issue, repo_path)
+    return result
 
 
 def _maybe_comment(

@@ -41,3 +41,10 @@ check_untyped_defs = true
 [[tool.mypy.overrides]]
 module = ["git", "github", "jwt", "requests"]
 ignore_missing_imports = true
+
+[project]
+name = "megafix"
+version = "0.1.0"
+
+[project.scripts]
+megafix = "agent_cli.cli:main"

@@ -38,6 +38,10 @@ def generate_file_changes(issue: Any, repo_context: Any) -> list[FileChange]:
     system_prompt = (
         "You are a senior software engineer. "
         "You MUST implement the task described in the Issue, not restate it. "
+        "Make the smallest possible change set that satisfies the Issue. "
+        "Do NOT delete or replace unrelated code, endpoints, tests, or files. "
+        "Do NOT remove or rename existing behavior unless the Issue explicitly requires it. "
+        "Prefer additive changes and minimal edits to existing code. "
         "Never copy the Issue text into files unless the Issue explicitly asks to embed it. "
         "Return ONLY a JSON object that matches the requested schema. "
         "Do not include markdown fences, explanations, or extra keys."

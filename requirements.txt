@@ -1,0 +1,12 @@
+black
+mypy
+ruff
+python-dotenv
+pyjwt[crypto]
+requests
+pygithub
+gitpython
+fastapi
+redis
+rq
+uvicorn

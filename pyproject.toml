@@ -30,7 +30,7 @@ known-first-party = ["agent_cli", "reviewer_agent"]
 [tool.mypy]
 python_version = "3.13"
 mypy_path = "src"
-files = ["src", "gh-stuff.py"]
+files = ["src"]
 namespace_packages = true
 explicit_package_bases = true
 warn_unused_ignores = true
@@ -39,5 +39,5 @@ warn_return_any = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["git", "github", "jwt"]
+module = ["git", "github", "jwt", "requests"]
 ignore_missing_imports = true

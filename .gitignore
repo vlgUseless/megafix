@@ -22,3 +22,4 @@ wheels/
 # Temporary files
 tmp/
 .agent_workdir/
+review_state.db

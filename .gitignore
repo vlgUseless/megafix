@@ -23,3 +23,5 @@ wheels/
 tmp/
 .agent_workdir/
 review_state.db
+tests/tmp_repo/
+.tmp/

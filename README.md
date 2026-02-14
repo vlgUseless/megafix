@@ -172,6 +172,8 @@ GITHUB_PRIVATE_KEY_PATH=/run/secrets/github_private_key.pem
 - `LLM_MAX_RELEVANT_FILES` (default `12`)
 - `LLM_MAX_FILE_BYTES` (default `50000`)
 - `LLM_MAX_TREE_ENTRIES` (default `5000`)
+- `EDIT_ALLOW_CREATE_FILES` (default `0`) — разрешает op `create_file` в
+  `repo_propose_edits` / `repo_apply_edits`.
 
 ### Review
 
@@ -180,6 +182,18 @@ GITHUB_PRIVATE_KEY_PATH=/run/secrets/github_private_key.pem
 - `REVIEW_MAX_PATCH_CHARS` (default `6000`)
 - `REVIEW_MAX_LOG_CHARS` (default `4000`)
 - `REVIEW_RERUN_MAX_ATTEMPTS` (default `5`)
+
+## Guardrails для create_file
+
+- По умолчанию создание файлов выключено (`EDIT_ALLOW_CREATE_FILES=0`).
+- Разрешены только безопасные относительные пути внутри репозитория.
+- На создание файла распространяются deny-правила:
+  `PATCH_DENY_PREFIXES` и `PATCH_DENY_GLOBS`.
+- `create_file` запрещён для уже существующих файлов.
+- Для `create_file` требуется:
+  `start_line=null`, `end_line=null`, `line=null`, `expected_old_text=""`.
+- Размер `new_text` ограничен (`200000` символов на один файл).
+- За один вызов edit tool можно создать не более `10` новых файлов.
 
 ## Как менять модель
 

@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from agent_core.llm import LLMServiceError
 from reviewer_agent.actions_logs import get_workflow_runs_and_logs
 from reviewer_agent.review_agent import review_pull_request
 
@@ -57,8 +58,14 @@ def test_review_agent_stub_comment():
         head=SimpleNamespace(sha="abc"),
     )
     issue = SimpleNamespace(number=10, title="Test issue")
-    comment, approve = review_pull_request(
-        pr, issue, workflow_runs=[], failed_job_logs={}
-    )
-    assert "stub implementation" in comment.lower()
+    with patch(
+        "reviewer_agent.review_agent.summarize_review",
+        side_effect=LLMServiceError("boom"),
+    ):
+        comment, approve, verdict = review_pull_request(
+            pr, issue, workflow_runs=[], failed_job_logs={}
+        )
+    assert "megafix review" in comment.lower()
+    assert "llm review unavailable" in comment.lower()
     assert approve is False
+    assert verdict is None

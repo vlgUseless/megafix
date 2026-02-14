@@ -14,6 +14,13 @@ def _strtobool(value: str | None) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _read_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return _strtobool(raw)
+
+
 def _read_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -46,6 +53,12 @@ def _read_float(name: str, default: float) -> float:
     except ValueError as exc:
         raise ValueError(f"Invalid float for {name}: {raw}") from exc
     return value
+
+
+def _read_csv(name: str, default: str) -> tuple[str, ...]:
+    raw = os.getenv(name, default)
+    items = [item.strip() for item in raw.split(",") if item.strip()]
+    return tuple(items)
 
 
 @dataclass(frozen=True)
@@ -82,6 +95,21 @@ class Settings:
     review_max_patch_chars: int
     review_max_log_chars: int
     review_rerun_max_attempts: int
+    patch_require_git_diff_header: bool
+    patch_max_files: int
+    patch_max_deleted_lines: int
+    patch_max_deleted_ratio: float
+    patch_deny_prefixes: tuple[str, ...]
+    patch_deny_globs: tuple[str, ...]
+    edit_allow_create_files: bool
+    context_max_read_lines: int
+    tool_max_calls_per_turn: int
+    tool_schema_strict: bool
+    check_allow_custom_commands: bool
+    check_timeout_sec: int
+    check_total_timeout_sec: int
+    check_max_log_chars: int
+    check_allowlist: tuple[str, ...]
 
 
 @lru_cache(maxsize=1)
@@ -121,6 +149,27 @@ def get_settings() -> Settings:
         review_max_patch_chars=_read_int("REVIEW_MAX_PATCH_CHARS", 6_000),
         review_max_log_chars=_read_int("REVIEW_MAX_LOG_CHARS", 4_000),
         review_rerun_max_attempts=_read_int("REVIEW_RERUN_MAX_ATTEMPTS", 5),
+        patch_require_git_diff_header=_read_bool("PATCH_REQUIRE_GIT_DIFF_HEADER", True),
+        patch_max_files=_read_int("PATCH_MAX_FILES", 50),
+        patch_max_deleted_lines=_read_int("PATCH_MAX_DELETED_LINES", 200),
+        patch_max_deleted_ratio=_read_float("PATCH_MAX_DELETED_RATIO", 0.3),
+        patch_deny_prefixes=_read_csv(
+            "PATCH_DENY_PREFIXES",
+            ".git/,.github/workflows/,.github/actions/",
+        ),
+        patch_deny_globs=_read_csv(
+            "PATCH_DENY_GLOBS",
+            ".env,.env.*,*.pem,*.key,*.p12,*.pfx",
+        ),
+        edit_allow_create_files=_read_bool("EDIT_ALLOW_CREATE_FILES", False),
+        context_max_read_lines=_read_int("CONTEXT_MAX_READ_LINES", 400),
+        tool_max_calls_per_turn=_read_int("TOOL_MAX_CALLS_PER_TURN", 6),
+        tool_schema_strict=_read_bool("TOOL_SCHEMA_STRICT", True),
+        check_allow_custom_commands=_read_bool("CHECK_ALLOW_CUSTOM_COMMANDS", False),
+        check_timeout_sec=_read_int("CHECK_TIMEOUT_SEC", 900),
+        check_total_timeout_sec=_read_int("CHECK_TOTAL_TIMEOUT_SEC", 1800),
+        check_max_log_chars=_read_int("CHECK_MAX_LOG_CHARS", 10_000),
+        check_allowlist=_read_csv("CHECK_ALLOWLIST", ""),
     )
 
 

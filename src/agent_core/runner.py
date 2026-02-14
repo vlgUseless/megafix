@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
 
-from agent_core.agents import llm_code_agent
-from agent_core.agents.code_agent_base import CodeAgentResult, IssueContext
+from agent_core.agents.code_agent_base import IssueContext
 from agent_core.git_ops import commit_if_needed, prepare_repo, push_branch
 from agent_core.github_client import (
     comment_issue,
@@ -18,6 +16,7 @@ from agent_core.github_client import (
     get_repo_info,
 )
 from agent_core.logging_setup import setup_logging
+from agent_core.orchestrator.run_issue_graph import CodeAgentResultV2, run_issue_graph
 from agent_core.settings import get_settings
 from agent_core.workspace import job_workspace
 
@@ -25,18 +24,14 @@ LOG = logging.getLogger(__name__)
 
 
 def _apply_changes(
-    repo_path: Path, issue: IssueContext, settings_apply_cmd: str | None
-) -> CodeAgentResult:
+    repo_path: Path, issue: IssueContext, _settings_apply_cmd: str | None
+) -> CodeAgentResultV2:
     settings = get_settings()
-    if not settings.llm_service_url:
-        raise RuntimeError("LLM_SERVICE_URL is not configured. LLM agent is required.")
-    result = llm_code_agent.run_issue(issue, repo_path)
 
-    if settings_apply_cmd:
-        LOG.info("Running apply command: %s", settings_apply_cmd)
-        subprocess.run(settings_apply_cmd, cwd=str(repo_path), shell=True, check=True)
+    def progress_cb(message: str) -> None:
+        LOG.info("Agent progress: %s", message)
 
-    return result
+    return run_issue_graph(issue, repo_path, settings, progress_cb)
 
 
 def _maybe_comment(
@@ -80,12 +75,26 @@ def _handle_issue_opened_sync(
         _maybe_comment(token, repo, issue_number, "Applying changes.")
         result = _apply_changes(repo_path, issue, settings.apply_cmd)
 
+        if not result.checks_ok:
+            _maybe_comment(
+                token,
+                repo,
+                issue_number,
+                "Checks failed. Skipping commit and PR creation.",
+            )
+            return {
+                "ok": True,
+                "committed": False,
+                "pr_url": None,
+                "checks_ok": False,
+            }
+
         committed = commit_if_needed(
             repo_path, f"Agent: implement issue #{issue_number}"
         )
         if not committed:
             _maybe_comment(token, repo, issue_number, "No changes to commit.")
-            return {"ok": True, "committed": False, "pr_url": None}
+            return {"ok": True, "committed": False, "pr_url": None, "checks_ok": True}
 
         push_branch(repo_path, branch)
         _maybe_comment(token, repo, issue_number, "Pushed branch and creating PR.")
@@ -95,7 +104,7 @@ def _handle_issue_opened_sync(
         )
         _maybe_comment(token, repo, issue_number, f"PR ready: {pr_url}")
 
-    return {"ok": True, "committed": True, "pr_url": pr_url}
+    return {"ok": True, "committed": True, "pr_url": pr_url, "checks_ok": True}
 
 
 async def handle_issue_opened(

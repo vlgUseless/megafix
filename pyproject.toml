@@ -39,7 +39,20 @@ warn_return_any = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["git", "github", "jwt", "requests"]
+module = [
+  "git",
+  "github",
+  "jwt",
+  "requests",
+  "langchain",
+  "langchain.*",
+  "langchain_core",
+  "langchain_core.*",
+  "langchain_openai",
+  "langchain_openai.*",
+  "langgraph",
+  "langgraph.*",
+]
 ignore_missing_imports = true
 
 [project]

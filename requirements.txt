@@ -12,3 +12,6 @@ rq
 uvicorn
 typer
 pytest
+langchain
+langchain-openai
+langgraph

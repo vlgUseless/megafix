@@ -1,10 +1,11 @@
-version: "3.9"
-
 services:
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     volumes:
       - redis_data:/data
 
@@ -23,7 +24,8 @@ services:
       # Optional: mount private key if using file path
       # - ./path/to/private-key.pem:/run/secrets/github_private_key.pem:ro
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     ports:
       - "8000:8000"
 
@@ -42,7 +44,8 @@ services:
       # Optional: mount private key if using file path
       # - ./path/to/private-key.pem:/run/secrets/github_private_key.pem:ro
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
 
   smee:
     image: amplifysecurity/smee-client:latest

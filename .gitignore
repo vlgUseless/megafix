@@ -15,6 +15,8 @@ wheels/
 
 # Environment variables
 .env
+.env.*
+!.env.example
 
 # Private keys
 *.pem

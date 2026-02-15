@@ -19,7 +19,6 @@ from agent_core.logging_setup import setup_logging
 from agent_core.runner import handle_issue_opened_job
 from agent_core.settings import get_settings
 from reviewer_agent.actions_logs import (
-    get_workflow_run_and_logs_by_id,
     get_workflow_runs_and_logs,
 )
 from reviewer_agent.review_agent import review_pull_request
@@ -85,7 +84,9 @@ def handle_review_job(
         LOG.warning("No pull request found for review job; skipping.")
         return {"ok": False, "reason": "pr_not_found"}
 
-    review_state_key = _review_state_key(head_sha, run_id)
+    pull_request = repository.get_pull(pr_number)
+    target_head_sha = pull_request.head.sha if pull_request.head else head_sha
+    review_state_key = _review_state_key(target_head_sha, run_id)
     review_lock_key = _review_lock_key(repo_full_name, pr_number, review_state_key)
     lock_acquired = False
     if review_lock_key:
@@ -95,7 +96,7 @@ def handle_review_job(
                 "Skipping duplicate review for %s#%s (sha=%s, run_id=%s)",
                 repo_full_name,
                 pr_number,
-                head_sha,
+                target_head_sha,
                 run_id,
             )
             return {
@@ -103,6 +104,51 @@ def handle_review_job(
                 "skipped": True,
                 "pr_number": pr_number,
             }
+    else:
+        LOG.warning(
+            "Missing review key for %s#%s (sha=%s, run_id=%s); state lock is disabled.",
+            repo_full_name,
+            pr_number,
+            target_head_sha,
+            run_id,
+        )
+
+    if head_sha and target_head_sha and head_sha != target_head_sha:
+        LOG.info(
+            "workflow_run sha differs from current PR head; using current head sha=%s (event sha=%s)",
+            target_head_sha,
+            head_sha,
+        )
+
+    issue_number = _extract_issue_number(pull_request.body)
+    is_agent_issue_pr = _is_agent_issue_pr(pull_request, issue_number)
+    if issue_number and issue_number != pull_request.number:
+        try:
+            issue = repository.get_issue(issue_number)
+        except Exception as exc:
+            LOG.warning("Failed to fetch issue #%s: %s", issue_number, exc)
+            issue = repository.get_issue(pull_request.number)
+    else:
+        issue = repository.get_issue(pull_request.number)
+
+    workflow_runs, failed_job_logs = get_workflow_runs_and_logs(
+        repository, pull_request, token=token, head_sha=target_head_sha
+    )
+    if _has_pending_runs(workflow_runs):
+        if lock_acquired and review_lock_key:
+            _release_review_lock(review_lock_key)
+        LOG.info(
+            "Skipping review for %s#%s: CI still in progress for sha=%s",
+            repo_full_name,
+            pr_number,
+            target_head_sha,
+        )
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "ci_pending",
+            "pr_number": pr_number,
+        }
 
     completed = False
     attempts = 0
@@ -132,36 +178,8 @@ def handle_review_job(
             "Missing review key for %s#%s (sha=%s, run_id=%s); state not tracked.",
             repo_full_name,
             pr_number,
-            head_sha,
+            target_head_sha,
             run_id,
-        )
-
-    pull_request = repository.get_pull(pr_number)
-
-    issue_number = _extract_issue_number(pull_request.body)
-    if issue_number and issue_number != pull_request.number:
-        try:
-            issue = repository.get_issue(issue_number)
-        except Exception as exc:
-            LOG.warning("Failed to fetch issue #%s: %s", issue_number, exc)
-            issue = repository.get_issue(pull_request.number)
-    else:
-        issue = repository.get_issue(pull_request.number)
-
-    if run_id is not None:
-        try:
-            run, failed_job_logs = get_workflow_run_and_logs_by_id(
-                repository, run_id, token=token
-            )
-            workflow_runs = [run]
-        except Exception as exc:
-            LOG.warning("Failed to fetch workflow run %s: %s", run_id, exc)
-            workflow_runs, failed_job_logs = get_workflow_runs_and_logs(
-                repository, pull_request, token=token
-            )
-    else:
-        workflow_runs, failed_job_logs = get_workflow_runs_and_logs(
-            repository, pull_request, token=token
         )
     review_comment, approve, verdict = review_pull_request(
         pull_request, issue, workflow_runs, failed_job_logs
@@ -196,15 +214,22 @@ def handle_review_job(
 
     rerun_triggered = False
     rerun_attempts = None
-    if verdict == "request_changes":
+    if verdict == "request_changes" and issue_number and is_agent_issue_pr:
         rerun_triggered, rerun_attempts = _maybe_rerun_code_agent(
             repo_full_name=repo_full_name,
-            issue_number=issue.number,
+            issue_number=issue_number,
             installation_id=installation_id,
             review_key=review_state_key,
+            review_feedback=review_comment,
         )
-    else:
-        _mark_rerun_completed(repo_full_name, issue.number)
+    elif verdict == "request_changes":
+        LOG.info(
+            "Auto-rerun skipped for %s#%s: PR is not an agent issue PR.",
+            repo_full_name,
+            pull_request.number,
+        )
+    elif issue_number and is_agent_issue_pr and review_state_key:
+        _mark_rerun_completed(repo_full_name, issue_number, review_state_key)
 
     return {
         "ok": True,
@@ -236,10 +261,10 @@ def _select_review_event(
 
 
 def _review_state_key(head_sha: str | None, run_id: int | None) -> str | None:
-    if run_id is not None:
-        return f"run:{run_id}"
     if head_sha:
         return f"sha:{head_sha}"
+    if run_id is not None:
+        return f"run:{run_id}"
     return None
 
 
@@ -312,11 +337,31 @@ def _ensure_rerun_state_table(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS rerun_state (
             repo TEXT NOT NULL,
             issue_number INTEGER NOT NULL,
+            review_key TEXT NOT NULL,
             attempts INTEGER NOT NULL DEFAULT 0,
             completed INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (repo, issue_number)
+            PRIMARY KEY (repo, issue_number, review_key)
         )
         """)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(rerun_state)")}
+    if "review_key" not in columns:
+        conn.execute("ALTER TABLE rerun_state RENAME TO rerun_state_v1")
+        conn.execute("""
+            CREATE TABLE rerun_state (
+                repo TEXT NOT NULL,
+                issue_number INTEGER NOT NULL,
+                review_key TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                completed INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (repo, issue_number, review_key)
+            )
+            """)
+        conn.execute("""
+            INSERT INTO rerun_state (repo, issue_number, review_key, attempts, completed)
+            SELECT repo, issue_number, 'legacy', attempts, completed
+            FROM rerun_state_v1
+            """)
+        conn.execute("DROP TABLE rerun_state_v1")
 
 
 def _register_review_attempt(
@@ -367,7 +412,7 @@ def _mark_review_completed(
 
 
 def _register_rerun_attempt(
-    repo_full_name: str, issue_number: int, max_attempts: int
+    repo_full_name: str, issue_number: int, review_key: str, max_attempts: int
 ) -> tuple[bool, int]:
     db_path = _review_state_db_path()
     with sqlite3.connect(db_path, timeout=5) as conn:
@@ -376,9 +421,9 @@ def _register_rerun_attempt(
             """
             SELECT attempts, completed
             FROM rerun_state
-            WHERE repo = ? AND issue_number = ?
+            WHERE repo = ? AND issue_number = ? AND review_key = ?
             """,
-            (repo_full_name, issue_number),
+            (repo_full_name, issue_number, review_key),
         ).fetchone()
         if row:
             attempts = int(row[0])
@@ -393,26 +438,28 @@ def _register_rerun_attempt(
         attempts += 1
         conn.execute(
             """
-            INSERT INTO rerun_state (repo, issue_number, attempts, completed)
-            VALUES (?, ?, ?, 0)
-            ON CONFLICT(repo, issue_number) DO UPDATE SET attempts = ?
+            INSERT INTO rerun_state (repo, issue_number, review_key, attempts, completed)
+            VALUES (?, ?, ?, ?, 0)
+            ON CONFLICT(repo, issue_number, review_key) DO UPDATE SET attempts = ?
             """,
-            (repo_full_name, issue_number, attempts, attempts),
+            (repo_full_name, issue_number, review_key, attempts, attempts),
         )
         return True, attempts
 
 
-def _mark_rerun_completed(repo_full_name: str, issue_number: int) -> None:
+def _mark_rerun_completed(
+    repo_full_name: str, issue_number: int, review_key: str
+) -> None:
     db_path = _review_state_db_path()
     with sqlite3.connect(db_path, timeout=5) as conn:
         _ensure_rerun_state_table(conn)
         conn.execute(
             """
-            INSERT INTO rerun_state (repo, issue_number, attempts, completed)
-            VALUES (?, ?, 0, 1)
-            ON CONFLICT(repo, issue_number) DO UPDATE SET completed = 1
+            INSERT INTO rerun_state (repo, issue_number, review_key, attempts, completed)
+            VALUES (?, ?, ?, 0, 1)
+            ON CONFLICT(repo, issue_number, review_key) DO UPDATE SET completed = 1
             """,
-            (repo_full_name, issue_number),
+            (repo_full_name, issue_number, review_key),
         )
 
 
@@ -422,11 +469,19 @@ def _maybe_rerun_code_agent(
     issue_number: int,
     installation_id: int,
     review_key: str | None,
+    review_feedback: str | None,
 ) -> tuple[bool, int | None]:
     settings = get_settings()
+    if not review_key:
+        LOG.warning(
+            "Rerun skipped for %s#%s: missing review key.",
+            repo_full_name,
+            issue_number,
+        )
+        return False, None
     max_attempts = settings.review_rerun_max_attempts
     should_rerun, attempts = _register_rerun_attempt(
-        repo_full_name, issue_number, max_attempts
+        repo_full_name, issue_number, review_key, max_attempts
     )
     if not should_rerun:
         LOG.info(
@@ -447,6 +502,7 @@ def _maybe_rerun_code_agent(
         issue_number,
         installation_id,
         delivery_id,
+        review_feedback,
         job_timeout=settings.rq_job_timeout,
         result_ttl=settings.rq_result_ttl,
         failure_ttl=settings.rq_failure_ttl,
@@ -459,3 +515,24 @@ def _maybe_rerun_code_agent(
         max_attempts,
     )
     return True, attempts
+
+
+def _has_pending_runs(workflow_runs: list[Any]) -> bool:
+    for run in workflow_runs:
+        status = getattr(run, "status", None)
+        if not isinstance(status, str) or status.lower() != "completed":
+            return True
+    return False
+
+
+def _is_agent_issue_pr(
+    pull_request: Any,
+    linked_issue_number: int | None,
+) -> bool:
+    if linked_issue_number is None:
+        return False
+    head = getattr(pull_request, "head", None)
+    ref = getattr(head, "ref", None)
+    if not isinstance(ref, str):
+        return False
+    return ref.startswith("agent/issue-")

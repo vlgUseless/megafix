@@ -1,7 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agent_core.llm import LLMServiceError
+from agent_core.llm import LLMServiceError, summarize_review
+from agent_core.settings import get_settings
 from reviewer_agent.actions_logs import get_workflow_runs_and_logs
 from reviewer_agent.review_agent import review_pull_request
 
@@ -40,10 +41,22 @@ def test_actions_logs_collects_failed_job_logs():
     ]
     repo = FakeRepo(runs)
 
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size=0):
+            _ = chunk_size
+            return [b"LOG CONTENT"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
     with patch("reviewer_agent.actions_logs.requests.get") as rg:
-        rg.return_value.status_code = 200
-        rg.return_value.content = b"LOG CONTENT"
-        rg.return_value.raise_for_status = lambda: None
+        rg.return_value = _Response()
 
         got_runs, failed_logs = get_workflow_runs_and_logs(repo, pr, token="t")
         assert len(got_runs) == 2
@@ -69,3 +82,105 @@ def test_review_agent_stub_comment():
     assert "llm review unavailable" in comment.lower()
     assert approve is False
     assert verdict is None
+
+
+def test_review_agent_normalizes_summary_verdict_line():
+    pr = SimpleNamespace(
+        number=1,
+        title="Test PR",
+        get_issue_comments=lambda: [],
+        get_files=lambda: [],
+        head=SimpleNamespace(sha="abc"),
+    )
+    issue = SimpleNamespace(number=1, title="Test issue")
+    llm_summary = "**Summary**\n" "- Looks good.\n\n" "**Verdict**\n" "approve\n"
+    with patch(
+        "reviewer_agent.review_agent.summarize_review", return_value=llm_summary
+    ):
+        comment, _, verdict = review_pull_request(
+            pr, issue, workflow_runs=[], failed_job_logs={}
+        )
+    assert verdict == "approve"
+    assert "**Verdict:** ✅ Approve" in comment
+    assert "**Verdict**\napprove" not in comment
+
+
+def test_summarize_review_uses_default_llm_config_for_reviewer(monkeypatch):
+    monkeypatch.setenv("LLM_SERVICE_URL", "https://default-llm.local")
+    monkeypatch.setenv("LLM_SERVICE_API_KEY", "default-key")
+    monkeypatch.setenv("LLM_SERVICE_MODEL", "default-model")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "123")
+    # Keep REVIEW_* present-but-empty so local .env values do not leak into test.
+    monkeypatch.setenv("REVIEW_LLM_SERVICE_URL", "")
+    monkeypatch.setenv("REVIEW_LLM_SERVICE_API_KEY", "")
+    monkeypatch.setenv("REVIEW_LLM_SERVICE_MODEL", "")
+    monkeypatch.setenv("REVIEW_LLM_MAX_TOKENS", "")
+    get_settings.cache_clear()
+
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def _fake_post(url, json, headers, timeout):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return _Response()
+
+    with patch("agent_core.llm.requests.post", side_effect=_fake_post):
+        summary = summarize_review(
+            "diff", {"runs": []}, {"number": 1, "title": "Issue"}
+        )
+
+    assert summary == "ok"
+    assert captured["url"] == "https://default-llm.local/v1/chat/completions"
+    assert captured["json"]["model"] == "default-model"
+    assert captured["json"]["max_tokens"] == 123
+    assert captured["headers"]["Authorization"] == "Bearer default-key"
+    get_settings.cache_clear()
+
+
+def test_summarize_review_uses_reviewer_llm_overrides(monkeypatch):
+    monkeypatch.setenv("LLM_SERVICE_URL", "https://default-llm.local")
+    monkeypatch.setenv("LLM_SERVICE_API_KEY", "default-key")
+    monkeypatch.setenv("LLM_SERVICE_MODEL", "default-model")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "123")
+    monkeypatch.setenv("REVIEW_LLM_SERVICE_URL", "https://review-llm.local")
+    monkeypatch.setenv("REVIEW_LLM_SERVICE_API_KEY", "review-key")
+    monkeypatch.setenv("REVIEW_LLM_SERVICE_MODEL", "review-model")
+    monkeypatch.setenv("REVIEW_LLM_MAX_TOKENS", "77")
+    get_settings.cache_clear()
+
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def _fake_post(url, json, headers, timeout):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return _Response()
+
+    with patch("agent_core.llm.requests.post", side_effect=_fake_post):
+        summary = summarize_review(
+            "diff", {"runs": []}, {"number": 1, "title": "Issue"}
+        )
+
+    assert summary == "ok"
+    assert captured["url"] == "https://review-llm.local/v1/chat/completions"
+    assert captured["json"]["model"] == "review-model"
+    assert captured["json"]["max_tokens"] == 77
+    assert captured["headers"]["Authorization"] == "Bearer review-key"
+    get_settings.cache_clear()

@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 import json
-import re
+import logging
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from redis import Redis
@@ -12,6 +12,7 @@ from agent_core.settings import get_settings
 from reviewer_agent.runner import handle_review_job
 
 app = FastAPI()
+LOG = logging.getLogger(__name__)
 
 settings = get_settings()
 redis_conn = Redis.from_url(settings.redis_url)
@@ -52,7 +53,7 @@ def _enqueue_review_job(
     base_branch: str | None = None,
     delivery_id: str | None = None,
 ) -> None:
-    q.enqueue(
+    job = q.enqueue(
         handle_review_job,
         repo,
         installation_id,
@@ -66,6 +67,15 @@ def _enqueue_review_job(
         result_ttl=settings.rq_result_ttl,
         failure_ttl=settings.rq_failure_ttl,
     )
+    LOG.info(
+        "Queued review job: repo=%s pr=%s run_id=%s sha=%s delivery=%s job_id=%s",
+        repo,
+        pr_number,
+        run_id,
+        head_sha,
+        delivery_id,
+        job.id,
+    )
 
 
 def _enqueue_issue_job(
@@ -75,7 +85,7 @@ def _enqueue_issue_job(
     *,
     delivery_id: str | None = None,
 ) -> None:
-    q.enqueue(
+    job = q.enqueue(
         handle_issue_opened_job,
         repo,
         issue_number,
@@ -84,6 +94,13 @@ def _enqueue_issue_job(
         job_timeout=settings.rq_job_timeout,
         result_ttl=settings.rq_result_ttl,
         failure_ttl=settings.rq_failure_ttl,
+    )
+    LOG.info(
+        "Queued issue job: repo=%s issue=%s delivery=%s job_id=%s",
+        repo,
+        issue_number,
+        delivery_id,
+        job.id,
     )
 
 
@@ -100,10 +117,16 @@ async def webhook(
     payload = json.loads(body.decode("utf-8"))
 
     if x_github_event == "ping":
+        LOG.debug("Received ping delivery=%s", x_github_delivery or None)
         return {"ok": True}
 
     if x_github_delivery and not acquire_delivery_lock(x_github_delivery):
         # уже видели эту доставку
+        LOG.info(
+            "Ignoring duplicate delivery: event=%s delivery=%s",
+            x_github_event,
+            x_github_delivery,
+        )
         return Response(status_code=202)
 
     if x_github_event == "issues":
@@ -129,29 +152,23 @@ async def webhook(
                     delivery_id=x_github_delivery or None,
                 )
                 return Response(status_code=202)
-
-    if x_github_event == "issue_comment" and payload.get("action") == "created":
-        issue = payload.get("issue", {})
-        if issue.get("pull_request"):
-            return {"ignored": True}
-        comment_body = (payload.get("comment", {}) or {}).get("body") or ""
-        if re.search(r"(?i)\\B/megafix\\s+(rerun|run)\\b", comment_body):
-            repo = payload["repository"]["full_name"]
-            issue_number = issue["number"]
-            installation_id = payload["installation"]["id"]
-            _enqueue_issue_job(
-                repo,
-                issue_number,
-                installation_id,
-                delivery_id=x_github_delivery or None,
-            )
-            return Response(status_code=202)
+        LOG.debug(
+            "Ignored issues event: action=%s repo=%s issue=%s",
+            action,
+            repo,
+            issue_number,
+        )
 
     if x_github_event == "workflow_run" and payload.get("action") == "completed":
         repo = payload["repository"]["full_name"]
         installation_id = payload["installation"]["id"]
         run = payload.get("workflow_run", {})
         if run.get("event") != "pull_request" or not run.get("pull_requests"):
+            LOG.debug(
+                "Ignored workflow_run: event=%s pull_requests=%s",
+                run.get("event"),
+                bool(run.get("pull_requests")),
+            )
             return {"ignored": True}
         run_id = run.get("id")
         head_sha = run.get("head_sha")
@@ -174,4 +191,10 @@ async def webhook(
         )
         return Response(status_code=202)
 
+    LOG.debug(
+        "Ignored webhook event: event=%s action=%s delivery=%s",
+        x_github_event,
+        payload.get("action"),
+        x_github_delivery or None,
+    )
     return {"ignored": True}

@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Any, TypedDict
 
 from github.Issue import Issue
@@ -9,6 +10,10 @@ from agent_core.llm import LLMServiceError, summarize_review
 from agent_core.settings import get_settings
 
 LOG = logging.getLogger(__name__)
+_VERDICT_LINE_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?(verdict|вердикт)(?:\*\*)?\s*:?\s*(.*)\s*$",
+    re.IGNORECASE,
+)
 
 
 class FailedLogSummary(TypedDict):
@@ -23,7 +28,7 @@ def review_pull_request(
     workflow_runs: list[WorkflowRun],
     failed_job_logs: dict[int, str | None],
 ) -> tuple[str, bool, str | None]:
-    """Generate a deterministic review summary for a PR."""
+    """Generate an LLM-assisted review summary and normalized verdict."""
     LOG.debug("Reviewing PR #%s: %s", pull_request.number, pull_request.title)
     LOG.debug("Related issue #%s: %s", issue.number, issue.title)
 
@@ -70,6 +75,7 @@ def review_pull_request(
     )
 
     ci_pass = bool(workflow_runs) and not failed_runs and not failed_job_logs
+    # LLM verdict is advisory; CI status remains a hard gate for approve.
     verdict = _extract_verdict(summary) if summary else None
     if verdict == "request_changes":
         approve = False
@@ -177,30 +183,67 @@ def _format_review_comment(
     file_names: list[str],
     summary: str | None,
 ) -> str:
-    comment = "## Megafix Review\n\n"
+    verdict = _extract_verdict(summary)
+    ci_ok = bool(workflow_runs) and not failed_runs and not failed_job_logs
+    if verdict == "approve":
+        verdict_text = "✅ Approve"
+    elif verdict == "request_changes":
+        verdict_text = "❌ Request changes"
+    elif ci_ok:
+        verdict_text = "✅ CI passed, no blocking findings"
+    else:
+        verdict_text = "⚠️ Needs attention"
 
-    comment += f"**PR:** {pull_request.title}\n"
-    if issue.number != pull_request.number:
-        comment += f"**Issue:** #{issue.number} — {issue.title}\n"
+    if ci_ok:
+        ci_text = "✅ passing"
+    elif not workflow_runs:
+        ci_text = "⚪ no workflow runs"
+    else:
+        ci_text = "❌ failing"
+
+    comment = "## Megafix Review\n\n"
+    comment += f"**Verdict:** {verdict_text}\n"
     comment += (
-        f"**Files:** {files_count} "
+        f"**CI:** {ci_text} "
+        f"({len(workflow_runs)} runs, {len(failed_runs)} failed, "
+        f"{len(failed_job_logs)} failed job logs)\n"
+    )
+    comment += (
+        f"**Diff scope:** {files_count} files "
         f"(+{total_additions}/-{total_deletions}, {total_changes} total)\n"
-        f"**CI:** {len(workflow_runs)} runs, "
-        f"{len(failed_runs)} failed, {len(failed_job_logs)} failed job logs\n"
-        f"**Comments:** {comments_count}\n"
     )
 
+    comment += "\n<details>\n"
+    comment += "<summary>Context</summary>\n\n"
+    comment += f"- PR: {pull_request.title}\n"
+    if issue.number != pull_request.number:
+        comment += f"- Issue: #{issue.number} — {issue.title}\n"
+    else:
+        comment += f"- Issue: #{issue.number}\n"
     if file_names:
-        comment += "\n**Touched files:**\n"
-        for name in file_names:
-            comment += f"- `{name}`\n"
+        shown = min(len(file_names), 8)
+        rendered = ", ".join(f"`{name}`" for name in file_names[:shown])
+        comment += f"- Touched files (showing {shown} of {files_count}): {rendered}\n"
+        remaining = files_count - shown
+        if remaining > 0:
+            comment += f"- Plus {remaining} more file(s).\n"
+    comment += "\n</details>\n\n"
 
-    comment += "\n---\n\n"
+    comment += "### Assessment\n"
 
     if summary:
-        comment += summary.strip() + "\n"
+        cleaned_summary = _strip_verdict_block(summary).strip()
+        if cleaned_summary:
+            comment += cleaned_summary + "\n\n"
     else:
-        comment += "LLM review unavailable. Please check CI and PR changes manually.\n"
+        comment += (
+            "- LLM review unavailable. Please check CI and PR changes manually.\n"
+        )
+        comment += f"- Standard verdict: {verdict_text}.\n"
+        if failed_runs:
+            comment += f"- {len(failed_runs)} workflow run(s) reported failures.\n"
+        if failed_job_logs:
+            comment += f"- {len(failed_job_logs)} failed job log(s) were collected.\n"
     return comment
 
 
@@ -221,3 +264,55 @@ def _extract_verdict(summary: str | None) -> str | None:
     if "approve" in lowered or "lgtm" in lowered:
         return "approve"
     return None
+
+
+def _strip_verdict_block(summary: str) -> str:
+    lines = summary.splitlines()
+    kept: list[str] = []
+    skip_next_value = False
+    for line in lines:
+        stripped = line.strip()
+        match = _VERDICT_LINE_RE.match(stripped)
+        if match:
+            inline_tail = match.group(2).strip()
+            skip_next_value = bool(not inline_tail)
+            continue
+        if skip_next_value:
+            if not stripped:
+                continue
+            if _looks_like_verdict_value(stripped):
+                skip_next_value = False
+                continue
+            skip_next_value = False
+        kept.append(line)
+    return _squash_blank_lines("\n".join(kept).strip())
+
+
+def _looks_like_verdict_value(text: str) -> bool:
+    normalized = text.strip().strip("*_`")
+    normalized = normalized.lstrip("-* ").strip().strip("*_`").lower()
+    return normalized in {
+        "approve",
+        "approved",
+        "lgtm",
+        "request changes",
+        "changes requested",
+        "request_changes",
+    }
+
+
+def _squash_blank_lines(text: str) -> str:
+    if not text:
+        return ""
+    parts = text.splitlines()
+    out: list[str] = []
+    blank = False
+    for line in parts:
+        if line.strip():
+            out.append(line)
+            blank = False
+            continue
+        if not blank:
+            out.append("")
+            blank = True
+    return "\n".join(out).strip()

@@ -37,6 +37,14 @@ Webhook будет слушать `http://localhost:8000/webhook`.
 docker compose --profile dev up --build
 ```
 
+## Управление зависимостями (uv)
+
+Проект использует `uv` и lock-файл `uv.lock`.
+
+- Установка зависимостей: `uv sync`
+- Установка с dev-инструментами: `uv sync --dev`
+- Обновление lock-файла после изменения зависимостей: `uv lock`
+
 ## Настройка GitHub App
 
 ### 1) Создайте GitHub App
@@ -63,7 +71,6 @@ Repository permissions:
 ### 4) Subscribe to events
 
 - **Issues**
-- **Issue comment**
 - **Workflow run**
 
 ### 5) Сгенерируйте ключ
@@ -109,9 +116,9 @@ GITHUB_PRIVATE_KEY_PATH=/run/secrets/github_private_key.pem
 
 - **Issues**: при `opened`, `reopened` или `edited` (если менялись title/body)
   задача ставится в очередь.
-- **Issue comments**: комментарий `/megafix run` или `/megafix rerun` запускает
-  задачу на issue.
-- **workflow_run**: при `completed` запускается ревью PR и публикация review comment.
+- **workflow_run**: при `completed` запускается review-job. Перед публикацией
+  вердикта агент агрегирует состояние всех runs для текущего `head_sha` PR и
+  ждёт завершения CI (чтобы не публиковать ранние/противоречивые ревью).
 
 Пайплайн issue:
 1. Получаем installation token для GitHub App.
@@ -126,7 +133,8 @@ GITHUB_PRIVATE_KEY_PATH=/run/secrets/github_private_key.pem
 2. Генерируем ревью (LLM, с fallback).
 3. Публикуем PR review comment.
 4. Если вердикт "request changes", возможно автоматическое повторное выполнение
-   агента (см. `REVIEW_RERUN_MAX_ATTEMPTS`).
+   code-agent только для agent-PR (ветка `agent/issue-*` и ссылка `Closes #...`
+   в PR body), с лимитом попыток `REVIEW_RERUN_MAX_ATTEMPTS`.
 
 ## Переменные окружения
 
@@ -159,9 +167,17 @@ GITHUB_PRIVATE_KEY_PATH=/run/secrets/github_private_key.pem
 
 - `AGENT_WORKDIR` (default `.agent_workdir`)
 - `KEEP_WORKDIR` (1/0) — сохранять рабочие директории после выполнения задач
-- `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`
-- `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`
+- `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` — optional override автора коммита для `git`.
+- `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` — optional override коммитера для `git`.
 - `AGENT_APPLY_CMD` — команда, запускаемая после правок (например, `ruff`/`black`)
+
+### Checks по умолчанию
+
+- `run_checks` автоматически выбирает дефолтные команды под репозиторий:
+  - `python -m pytest -q` — только если найдены pytest targets/config.
+  - `python -m ruff check .` — только если найдена Ruff-конфигурация.
+- Для non-Python или минимальных репозиториев это может означать пустой набор
+  проверок по умолчанию (без ложных падений).
 
 ### LLM
 
@@ -169,9 +185,17 @@ GITHUB_PRIVATE_KEY_PATH=/run/secrets/github_private_key.pem
 - `LLM_SERVICE_MODEL` — идентификатор модели (меняйте здесь).
 - `LLM_SERVICE_API_KEY` или `OPENAI_API_KEY`
 - `LLM_MAX_TOKENS`
-- `LLM_MAX_RELEVANT_FILES` (default `12`)
-- `LLM_MAX_FILE_BYTES` (default `50000`)
-- `LLM_MAX_TREE_ENTRIES` (default `5000`)
+- `AGENT_MAX_PATCH_ATTEMPTS` (default `4`) — сколько подряд неуспешных попыток
+  `repo_propose_edits`/`repo_propose_patches` допускается до принудительного
+  завершения цикла.
+- `REVIEW_LLM_SERVICE_URL` (optional) — отдельный URL для review-агента;
+  если не задан, используется `LLM_SERVICE_URL`.
+- `REVIEW_LLM_SERVICE_API_KEY` (optional) — отдельный API key для review-агента;
+  если не задан, используется `LLM_SERVICE_API_KEY` / `OPENAI_API_KEY`.
+- `REVIEW_LLM_SERVICE_MODEL` (optional) — отдельная модель для review-агента;
+  если не задана, используется `LLM_SERVICE_MODEL`.
+- `REVIEW_LLM_MAX_TOKENS` (optional) — отдельный `max_tokens` для review-агента;
+  если не задан, используется `LLM_MAX_TOKENS`.
 - `EDIT_ALLOW_CREATE_FILES` (default `0`) — разрешает op `create_file` в
   `repo_propose_edits` / `repo_apply_edits`.
 
@@ -181,6 +205,7 @@ GITHUB_PRIVATE_KEY_PATH=/run/secrets/github_private_key.pem
 - `REVIEW_MAX_DIFF_CHARS` (default `120000`)
 - `REVIEW_MAX_PATCH_CHARS` (default `6000`)
 - `REVIEW_MAX_LOG_CHARS` (default `4000`)
+- `REVIEW_MAX_LOG_DOWNLOAD_BYTES` (default `2000000`) — ограничение на загрузку raw-логов failed jobs.
 - `REVIEW_RERUN_MAX_ATTEMPTS` (default `5`)
 
 ## Guardrails для create_file
@@ -199,7 +224,9 @@ GITHUB_PRIVATE_KEY_PATH=/run/secrets/github_private_key.pem
 
 1. В `.env` измените `LLM_SERVICE_MODEL` на нужную.
 2. При необходимости обновите `LLM_SERVICE_URL` и ключ.
-3. Перезапустите контейнеры.
+3. Если хотите отдельную модель для review-агента, задайте `REVIEW_LLM_SERVICE_MODEL`
+   (и при необходимости `REVIEW_LLM_SERVICE_URL`/`REVIEW_LLM_SERVICE_API_KEY`).
+4. Перезапустите контейнеры.
 
 Сервис работает с OpenAI-compatible API и ожидает `POST /v1/chat/completions`.
 

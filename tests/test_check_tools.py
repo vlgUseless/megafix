@@ -47,9 +47,8 @@ def test_run_checks_ignores_custom_commands_when_disabled(
         repo_path=tmp_path,
     )
     assert result["ok"] is True
-    assert seen == ["python -m ruff check ."]
-    assert result["results"][0]["command"] == "python -m pytest -q"
-    assert "Skipped pytest" in result["results"][0]["stdout"]
+    assert seen == []
+    assert result["results"] == []
     get_settings.cache_clear()
 
 
@@ -118,4 +117,66 @@ def test_run_checks_treats_pytest_exit_code_5_as_success(
     assert seen == ["python -m pytest -q", "python -m ruff check ."]
     assert result["results"][0]["exit_code"] == 0
     assert "No tests were collected by pytest" in result["results"][0]["stdout"]
+    get_settings.cache_clear()
+
+
+def test_run_checks_defaults_are_empty_for_non_python_repo(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("AGENT_APPLY_CMD", raising=False)
+    get_settings.cache_clear()
+
+    seen: list[str] = []
+
+    def fake_run(repo_root: Path, command: str, *, timeout: float):
+        seen.append(command)
+        return check_tools.CheckCommandResult(
+            command=command,
+            exit_code=0,
+            stdout="",
+            stderr="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+        )
+
+    monkeypatch.setattr(check_tools, "_run_command", fake_run)
+    result = check_tools.run_checks(repo_path=tmp_path)
+
+    assert result["ok"] is True
+    assert seen == []
+    assert result["results"] == []
+    get_settings.cache_clear()
+
+
+def test_run_checks_defaults_detect_pytest_and_ruff(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("AGENT_APPLY_CMD", raising=False)
+    get_settings.cache_clear()
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "test_sample.py").write_text(
+        "def test_sample():\n    assert True\n", encoding="utf-8"
+    )
+    (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n", encoding="utf-8")
+
+    seen: list[str] = []
+
+    def fake_run(repo_root: Path, command: str, *, timeout: float):
+        seen.append(command)
+        return check_tools.CheckCommandResult(
+            command=command,
+            exit_code=0,
+            stdout="",
+            stderr="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+        )
+
+    monkeypatch.setattr(check_tools, "_run_command", fake_run)
+    result = check_tools.run_checks(repo_path=tmp_path)
+
+    assert result["ok"] is True
+    assert seen == ["python -m pytest -q", "python -m ruff check ."]
     get_settings.cache_clear()

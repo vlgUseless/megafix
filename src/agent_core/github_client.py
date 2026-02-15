@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Mapping
@@ -61,20 +62,35 @@ def github_request(
     )
 
     if response.status_code >= 400:
-        # GitHub почти всегда отдаёт JSON с message + errors
+        # GitHub typically returns structured JSON with "message" and "errors".
         try:
             err = response.json()
         except Exception:
             err = response.text
         LOG.error(
-            "GitHub API error %s %s -> %s; response=%r",
+            "GitHub API error %s %s -> %s; response=%s",
             method,
             path,
             response.status_code,
-            err,
+            _format_error_payload(err),
         )
     response.raise_for_status()
     return response
+
+
+def _format_error_payload(payload: object, *, max_chars: int = 2000) -> str:
+    if isinstance(payload, str):
+        text = payload
+    else:
+        try:
+            text = json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            text = repr(payload)
+    compact = " ".join(text.split())
+    if len(compact) <= max_chars:
+        return compact
+    truncated = len(compact) - max_chars
+    return f"{compact[:max_chars]} ... [truncated {truncated} chars]"
 
 
 def get_installation_token(installation_id: int) -> str:

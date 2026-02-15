@@ -545,22 +545,12 @@ def _parse_edits(
 
         if op == "insert_after":
             line = _as_positive_int(raw.get("line"))
-            start_line_raw = raw.get("start_line")
-            end_line_raw = raw.get("end_line")
             new_text = raw.get("new_text")
-            if (
-                line is None
-                or start_line_raw is not None
-                or end_line_raw is not None
-                or not isinstance(new_text, str)
-            ):
+            if line is None or not isinstance(new_text, str):
                 errors.append(
                     EditError(
                         code="invalid_arguments",
-                        message=(
-                            "insert_after requires line and new_text, and start_line/"
-                            "end_line must be null."
-                        ),
+                        message="insert_after requires line and new_text.",
                         index=index,
                         path=normalized_path,
                     )
@@ -675,8 +665,16 @@ def _apply_single_edit(lines: list[str], edit: _StructuredEdit) -> EditError | N
         start_idx = edit.start_line - 1
         end_idx = edit.end_line
         actual_text = "".join(lines[start_idx:end_idx])
-        if actual_text != edit.expected_old_text:
-            return _expected_text_mismatch(edit, actual_text)
+        if not _texts_equivalent(actual_text, edit.expected_old_text):
+            # If the provided range is stale, allow a safe auto-realignment only when
+            # the expected block is unique in file; otherwise fail with conflict.
+            relocated = _find_unique_matching_range(lines, edit.expected_old_text)
+            if relocated is None:
+                return _expected_text_mismatch(edit, actual_text)
+            start_idx, end_idx = relocated
+            actual_text = "".join(lines[start_idx:end_idx])
+            if not _texts_equivalent(actual_text, edit.expected_old_text):
+                return _expected_text_mismatch(edit, actual_text)
         lines[start_idx:end_idx] = _text_to_lines(edit.new_text)
         return None
 
@@ -693,8 +691,15 @@ def _apply_single_edit(lines: list[str], edit: _StructuredEdit) -> EditError | N
             )
         anchor_idx = edit.line - 1
         actual_text = lines[anchor_idx]
-        if actual_text != edit.expected_old_text:
-            return _expected_text_mismatch(edit, actual_text)
+        if not _texts_equivalent(actual_text, edit.expected_old_text):
+            # Same rule for anchors: relocate only when the anchor text is unique.
+            relocated_anchor = _find_unique_anchor_line(lines, edit.expected_old_text)
+            if relocated_anchor is None:
+                return _expected_text_mismatch(edit, actual_text)
+            anchor_idx = relocated_anchor
+            actual_text = lines[anchor_idx]
+            if not _texts_equivalent(actual_text, edit.expected_old_text):
+                return _expected_text_mismatch(edit, actual_text)
         lines[anchor_idx + 1 : anchor_idx + 1] = _text_to_lines(edit.new_text)
         return None
 
@@ -726,8 +731,14 @@ def _apply_single_edit(lines: list[str], edit: _StructuredEdit) -> EditError | N
     start_idx = edit.start_line - 1
     end_idx = edit.end_line
     actual_text = "".join(lines[start_idx:end_idx])
-    if actual_text != edit.expected_old_text:
-        return _expected_text_mismatch(edit, actual_text)
+    if not _texts_equivalent(actual_text, edit.expected_old_text):
+        relocated = _find_unique_matching_range(lines, edit.expected_old_text)
+        if relocated is None:
+            return _expected_text_mismatch(edit, actual_text)
+        start_idx, end_idx = relocated
+        actual_text = "".join(lines[start_idx:end_idx])
+        if not _texts_equivalent(actual_text, edit.expected_old_text):
+            return _expected_text_mismatch(edit, actual_text)
     del lines[start_idx:end_idx]
     return None
 
@@ -796,6 +807,53 @@ def _text_to_lines(text: str) -> list[str]:
     if not text:
         return []
     return text.splitlines(keepends=True)
+
+
+def _normalize_text_for_match(text: str) -> str:
+    # Normalize line endings and tolerate trailing newline differences.
+    return text.replace("\r\n", "\n").rstrip("\n")
+
+
+def _texts_equivalent(actual_text: str, expected_text: str) -> bool:
+    if actual_text == expected_text:
+        return True
+    return _normalize_text_for_match(actual_text) == _normalize_text_for_match(
+        expected_text
+    )
+
+
+def _find_unique_matching_range(
+    lines: list[str], expected_old_text: str
+) -> tuple[int, int] | None:
+    # Returns a relocated [start, end) only when match is unique.
+    expected_lines = _text_to_lines(expected_old_text)
+    if not expected_lines:
+        return None
+    expected_norm = [_normalize_text_for_match(line) for line in expected_lines]
+    if not expected_norm:
+        return None
+    source_norm = [_normalize_text_for_match(line) for line in lines]
+    width = len(expected_norm)
+    if width > len(source_norm):
+        return None
+    matches: list[tuple[int, int]] = []
+    for start_idx in range(0, len(source_norm) - width + 1):
+        if source_norm[start_idx : start_idx + width] == expected_norm:
+            matches.append((start_idx, start_idx + width))
+            if len(matches) > 1:
+                return None
+    return matches[0] if matches else None
+
+
+def _find_unique_anchor_line(lines: list[str], expected_old_text: str) -> int | None:
+    expected_norm = _normalize_text_for_match(expected_old_text)
+    matches: list[int] = []
+    for index, line in enumerate(lines):
+        if _normalize_text_for_match(line) == expected_norm:
+            matches.append(index)
+            if len(matches) > 1:
+                return None
+    return matches[0] if matches else None
 
 
 def _as_positive_int(value: object) -> int | None:

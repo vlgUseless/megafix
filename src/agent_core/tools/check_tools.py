@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 import subprocess
@@ -10,6 +11,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from agent_core.settings import get_settings
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -25,8 +28,9 @@ class CheckCommandResult:
 def run_checks(
     payload: dict[str, object] | None = None, *, repo_path: Path | None = None
 ) -> dict[str, object]:
-    commands = _validate_payload(payload)
     repo_root = _resolve_repo_root(repo_path)
+    commands = _validate_payload(payload, repo_root)
+    LOG.info("Running checks: count=%s repo=%s", len(commands), repo_root)
 
     results: list[CheckCommandResult] = []
     settings = get_settings()
@@ -34,8 +38,10 @@ def run_checks(
     total_timeout = settings.check_total_timeout_sec
     start_time = time.monotonic()
     for command in commands:
+        command_start = time.monotonic()
         skip_reason = _skip_reason(repo_root, command)
         if skip_reason:
+            LOG.info("Check skipped: command=%r reason=%s", command, skip_reason)
             results.append(
                 CheckCommandResult(
                     command=command,
@@ -52,6 +58,7 @@ def run_checks(
             total_timeout - elapsed if total_timeout > 0 else per_command_timeout
         )
         if remaining <= 0:
+            LOG.warning("Checks stopped: total timeout exceeded.")
             results.append(
                 CheckCommandResult(
                     command=command,
@@ -97,25 +104,52 @@ def run_checks(
                 stderr_truncated=False,
             )
         result = _normalize_non_fatal_exit(result)
+        duration_sec = time.monotonic() - command_start
+        if result.exit_code == 0:
+            LOG.debug(
+                "Check passed: command=%r duration_sec=%.2f",
+                result.command,
+                duration_sec,
+            )
+        else:
+            LOG.warning(
+                "Check failed: command=%r exit_code=%s duration_sec=%.2f",
+                result.command,
+                result.exit_code,
+                duration_sec,
+            )
         results.append(result)
         if result.exit_code != 0:
             break
 
     ok = all(result.exit_code == 0 for result in results)
+    if ok:
+        LOG.info("Checks completed: ok=true executed=%s", len(results))
+    else:
+        failed = next((item for item in results if item.exit_code != 0), None)
+        if failed is not None:
+            LOG.info(
+                "Checks completed: ok=false failed_command=%r exit_code=%s executed=%s",
+                failed.command,
+                failed.exit_code,
+                len(results),
+            )
+        else:
+            LOG.info("Checks completed: ok=false executed=%s", len(results))
     return {
         "ok": ok,
         "results": [asdict(result) for result in results],
     }
 
 
-def _validate_payload(payload: dict[str, object] | None) -> list[str]:
+def _validate_payload(payload: dict[str, object] | None, repo_root: Path) -> list[str]:
     settings = get_settings()
     if payload is None:
-        return _default_commands(settings)
+        return _default_commands(settings, repo_root)
     if not isinstance(payload, dict):
         raise ValueError("Payload must be an object.")
     if not payload:
-        return _default_commands(settings)
+        return _default_commands(settings, repo_root)
 
     allowed = {"commands"}
     extra = set(payload.keys()) - allowed
@@ -124,7 +158,7 @@ def _validate_payload(payload: dict[str, object] | None) -> list[str]:
 
     commands = payload.get("commands")
     if commands is None:
-        return _default_commands(settings)
+        return _default_commands(settings, repo_root)
     if not isinstance(commands, list) or not commands:
         raise ValueError("commands must be a non-empty array of strings.")
     cleaned: list[str] = []
@@ -134,26 +168,32 @@ def _validate_payload(payload: dict[str, object] | None) -> list[str]:
         cleaned.append(item.strip())
 
     if not settings.check_allow_custom_commands:
-        return _default_commands(settings)
+        return _default_commands(settings, repo_root)
 
-    allowlist = _allowed_commands(settings)
+    allowlist = _allowed_commands(settings, repo_root)
     disallowed = [cmd for cmd in cleaned if cmd not in allowlist]
     if disallowed:
         raise ValueError(f"commands not in allowlist: {disallowed}")
     return cleaned
 
 
-def _default_commands(settings) -> list[str]:
-    commands = ["python -m pytest -q", "python -m ruff check ."]
+def _default_commands(settings, repo_root: Path) -> list[str]:
+    # Keep defaults conservative: only run language-specific checks when
+    # corresponding project markers exist, so non-Python repos are not blocked.
+    commands: list[str] = []
     if settings.apply_cmd:
         commands.insert(0, settings.apply_cmd)
+    if _repo_has_pytest_targets(repo_root):
+        commands.append("python -m pytest -q")
+    if _repo_has_ruff_targets(repo_root):
+        commands.append("python -m ruff check .")
     return commands
 
 
-def _allowed_commands(settings) -> list[str]:
+def _allowed_commands(settings, repo_root: Path) -> list[str]:
     if settings.check_allowlist:
         return list(settings.check_allowlist)
-    return _default_commands(settings)
+    return _default_commands(settings, repo_root)
 
 
 def _skip_reason(repo_root: Path, command: str) -> str | None:
@@ -270,6 +310,7 @@ def _normalize_command_args(args: list[str]) -> list[str]:
 
 def _normalize_non_fatal_exit(result: CheckCommandResult) -> CheckCommandResult:
     if _is_pytest_command(result.command) and result.exit_code == 5:
+        LOG.info("Treating pytest exit code 5 as success: command=%r", result.command)
         note = "No tests were collected by pytest; treating exit code 5 as success."
         stdout = result.stdout.strip()
         stdout = f"{stdout}\n{note}" if stdout else note
@@ -344,6 +385,14 @@ def _repo_has_pytest_targets(repo_root: Path) -> bool:
             if lower_name.endswith("_test.py"):
                 return True
     return False
+
+
+def _repo_has_ruff_targets(repo_root: Path) -> bool:
+    if (repo_root / ".ruff.toml").exists():
+        return True
+    if (repo_root / "ruff.toml").exists():
+        return True
+    return _file_contains(repo_root / "pyproject.toml", "[tool.ruff]")
 
 
 def _file_contains(path: Path, marker: str) -> bool:

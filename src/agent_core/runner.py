@@ -6,7 +6,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from agent_core.agents.code_agent_base import IssueContext
 from agent_core.git_ops import commit_if_needed, prepare_repo, push_branch
 from agent_core.github_client import (
     comment_issue,
@@ -17,15 +16,14 @@ from agent_core.github_client import (
 )
 from agent_core.logging_setup import setup_logging
 from agent_core.orchestrator.run_issue_graph import CodeAgentResultV2, run_issue_graph
+from agent_core.schemas import IssueContext
 from agent_core.settings import get_settings
 from agent_core.workspace import job_workspace
 
 LOG = logging.getLogger(__name__)
 
 
-def _apply_changes(
-    repo_path: Path, issue: IssueContext, _settings_apply_cmd: str | None
-) -> CodeAgentResultV2:
+def _apply_changes(repo_path: Path, issue: IssueContext) -> CodeAgentResultV2:
     settings = get_settings()
 
     def progress_cb(message: str) -> None:
@@ -49,21 +47,39 @@ def _maybe_comment(
 
 
 def _handle_issue_opened_sync(
-    repo: str, issue_number: int, installation_id: int, delivery_id: str | None
+    repo: str,
+    issue_number: int,
+    installation_id: int,
+    delivery_id: str | None,
+    rerun_feedback: str | None = None,
 ) -> dict[str, Any]:
     setup_logging()
-    settings = get_settings()
-    LOG.info("Handling issue %s in %s (delivery=%s)", issue_number, repo, delivery_id)
+    LOG.info(
+        "Handling issue %s in %s (delivery=%s, has_feedback=%s)",
+        issue_number,
+        repo,
+        delivery_id,
+        bool(rerun_feedback),
+    )
 
     token = get_installation_token(installation_id)
-    _maybe_comment(token, repo, issue_number, "Started processing the issue.")
+    if rerun_feedback:
+        _maybe_comment(
+            token,
+            repo,
+            issue_number,
+            "Started processing reviewer-requested rerun.",
+        )
+    else:
+        _maybe_comment(token, repo, issue_number, "Started processing the issue.")
 
     repo_info = get_repo_info(token, repo)
     issue_payload = get_issue(token, repo, issue_number)
+    issue_body = _compose_issue_body(issue_payload.get("body"), rerun_feedback)
     issue = IssueContext(
         number=issue_number,
         title=issue_payload.get("title") or f"Issue #{issue_number}",
-        body=issue_payload.get("body"),
+        body=issue_body,
     )
 
     branch = f"agent/issue-{issue_number}"
@@ -73,7 +89,7 @@ def _handle_issue_opened_sync(
         repo_path = prepare_repo(repo_info, token, base_dir=base_dir, branch=branch)
 
         _maybe_comment(token, repo, issue_number, "Applying changes.")
-        result = _apply_changes(repo_path, issue, settings.apply_cmd)
+        result = _apply_changes(repo_path, issue)
 
         if not result.checks_ok:
             _maybe_comment(
@@ -108,14 +124,58 @@ def _handle_issue_opened_sync(
 
 
 async def handle_issue_opened(
-    repo: str, issue_number: int, installation_id: int, delivery_id: str | None
+    repo: str,
+    issue_number: int,
+    installation_id: int,
+    delivery_id: str | None,
+    rerun_feedback: str | None = None,
 ) -> dict[str, Any]:
     return await asyncio.to_thread(
-        _handle_issue_opened_sync, repo, issue_number, installation_id, delivery_id
+        _handle_issue_opened_sync,
+        repo,
+        issue_number,
+        installation_id,
+        delivery_id,
+        rerun_feedback,
     )
 
 
 def handle_issue_opened_job(
-    repo: str, issue_number: int, installation_id: int, delivery_id: str | None = None
+    repo: str,
+    issue_number: int,
+    installation_id: int,
+    delivery_id: str | None = None,
+    rerun_feedback: str | None = None,
 ) -> dict[str, Any]:
-    return _handle_issue_opened_sync(repo, issue_number, installation_id, delivery_id)
+    return _handle_issue_opened_sync(
+        repo,
+        issue_number,
+        installation_id,
+        delivery_id,
+        rerun_feedback,
+    )
+
+
+def _compose_issue_body(
+    original_body: object, rerun_feedback: str | None, *, max_chars: int = 8000
+) -> str | None:
+    base = original_body if isinstance(original_body, str) else ""
+    if not rerun_feedback:
+        return base or None
+
+    feedback = rerun_feedback.strip()
+    if not feedback:
+        return base or None
+    if len(feedback) > max_chars:
+        feedback = feedback[:max_chars].rstrip() + "\n...[feedback truncated]"
+
+    suffix = (
+        "\n\n---\n\n"
+        "### Reviewer Feedback To Address\n"
+        "This run was triggered automatically after reviewer requested changes. "
+        "Address the feedback below with minimal, safe edits while keeping previous "
+        "requirements satisfied.\n\n"
+        f"{feedback}"
+    )
+    merged = (base + suffix).strip()
+    return merged or None

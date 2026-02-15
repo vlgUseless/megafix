@@ -47,7 +47,7 @@ def _setup_common_runner_mocks(monkeypatch, tmp_path: Path, *, checks_ok: bool) 
     monkeypatch.setattr(
         runner,
         "_apply_changes",
-        lambda repo_path, issue, _settings_apply_cmd: CodeAgentResultV2(
+        lambda repo_path, issue: CodeAgentResultV2(
             pr_title="PR title",
             pr_body="PR body",
             final_message="done",
@@ -121,3 +121,45 @@ def test_handle_issue_opened_creates_pr_when_checks_pass(
     assert result["committed"] is True
     assert result["pr_url"] == "https://example.com/pr/1"
     assert calls == {"commit": 1, "push": 1, "pr": 1}
+
+
+def test_compose_issue_body_appends_reviewer_feedback() -> None:
+    body = runner._compose_issue_body("Original issue body", "Please add tests")
+
+    assert body is not None
+    assert "Original issue body" in body
+    assert "Reviewer Feedback To Address" in body
+    assert "Please add tests" in body
+
+
+def test_handle_issue_opened_passes_feedback_to_issue_context(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _setup_common_runner_mocks(monkeypatch, tmp_path, checks_ok=False)
+    captured: dict[str, object] = {}
+
+    def fake_apply_changes(repo_path: Path, issue):
+        _ = repo_path
+        captured["body"] = issue.body
+        return CodeAgentResultV2(
+            pr_title="PR title",
+            pr_body="PR body",
+            final_message="done",
+            checks_ok=False,
+            iterations=1,
+        )
+
+    monkeypatch.setattr(runner, "_apply_changes", fake_apply_changes)
+
+    runner._handle_issue_opened_sync(
+        "owner/repo",
+        55,
+        1,
+        "review-rerun:sha:1",
+        "Review requested changes: fix edge case",
+    )
+
+    body = captured.get("body")
+    assert isinstance(body, str)
+    assert "Reviewer Feedback To Address" in body
+    assert "Review requested changes: fix edge case" in body

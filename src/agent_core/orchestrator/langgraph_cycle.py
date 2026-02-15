@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
-from agent_core.agents.code_agent_base import IssueContext
+from agent_core.schemas import IssueContext
 from agent_core.settings import get_settings
 from agent_core.tools.registry import get_tool_definitions, get_tool_handler
 
@@ -64,6 +64,7 @@ class AgentState(TypedDict):
     last_error_code: str | None
     same_error_count: int
     max_same_error: int
+    tool_overview_logged: bool
 
 
 class ToolCall(TypedDict):
@@ -83,7 +84,8 @@ def build_patch_agent_graph(llm: Any, *, repo_path: Path, max_iterations: int = 
 
     def assistant(state: AgentState) -> dict[str, object]:
         trimmed_messages = _trim_messages(state["messages"])
-        _log_tool_payload(tool_defs)
+        first_tool_overview = not state.get("tool_overview_logged", False)
+        _log_tool_payload(tool_defs, first_tool_overview=first_tool_overview)
         _log_messages(trimmed_messages)
         try:
             response = llm_with_tools.invoke(trimmed_messages)
@@ -91,7 +93,10 @@ def build_patch_agent_graph(llm: Any, *, repo_path: Path, max_iterations: int = 
             _log_llm_error(exc)
             raise
         _log_response(response)
-        return {"messages": _trim_messages(trimmed_messages + [response])}
+        return {
+            "messages": _trim_messages(trimmed_messages + [response]),
+            "tool_overview_logged": True,
+        }
 
     def tool_exec(state: AgentState) -> dict[str, object]:
         last = state["messages"][-1]
@@ -173,30 +178,7 @@ def build_patch_agent_graph(llm: Any, *, repo_path: Path, max_iterations: int = 
                 if apply_done:
                     checks_done = False
                     force_final = False
-            if name in {"repo_propose_edits", "repo_propose_patches"} and isinstance(
-                result, dict
-            ):
-                accepted = result.get("accepted")
-                _log_repo_propose_errors(name, result)
-                if accepted is False:
-                    patch_attempts += 1
-                    if max_patch_attempts and patch_attempts >= max_patch_attempts:
-                        force_final = True
-                        LOG.warning(
-                            "Patch attempts limit reached: %s/%s",
-                            patch_attempts,
-                            max_patch_attempts,
-                        )
-                        if HUMAN_MESSAGE_CLS is not None:
-                            pending_humans.append(
-                                HUMAN_MESSAGE_CLS(
-                                    content=(
-                                        "Patch could not be accepted after multiple "
-                                        "attempts. Stop tool calls and provide a final "
-                                        "summary with current status."
-                                    )
-                                )
-                            )
+            error_code: str | None = None
             if name in {
                 "repo_propose_edits",
                 "repo_apply_edits",
@@ -204,7 +186,55 @@ def build_patch_agent_graph(llm: Any, *, repo_path: Path, max_iterations: int = 
                 "repo_apply_patches",
             } and isinstance(result, dict):
                 error_code = _extract_first_error_code(result)
+            if name in {"repo_propose_edits", "repo_propose_patches"} and isinstance(
+                result, dict
+            ):
+                accepted = result.get("accepted")
+                _log_repo_propose_errors(name, result)
+                if accepted is False:
+                    # Context mismatch is often recoverable after a fresh read.
+                    # Do not consume the patch budget for this class of errors.
+                    if error_code in {"context_conflict", "anchor_not_found"}:
+                        LOG.info(
+                            "Patch proposal rejected with %s; patch attempt budget unchanged.",
+                            error_code,
+                        )
+                    else:
+                        patch_attempts += 1
+                        if max_patch_attempts and patch_attempts >= max_patch_attempts:
+                            force_final = True
+                            LOG.warning(
+                                "Patch attempts limit reached: %s/%s",
+                                patch_attempts,
+                                max_patch_attempts,
+                            )
+                            if HUMAN_MESSAGE_CLS is not None:
+                                pending_humans.append(
+                                    HUMAN_MESSAGE_CLS(
+                                        content=(
+                                            "Patch could not be accepted after multiple "
+                                            "attempts. Stop tool calls and provide a final "
+                                            "summary with current status."
+                                        )
+                                    )
+                                )
+            if name in {
+                "repo_propose_edits",
+                "repo_apply_edits",
+                "repo_propose_patches",
+                "repo_apply_patches",
+            } and isinstance(result, dict):
                 if error_code:
+                    if (
+                        error_code == "context_conflict"
+                        and name in {"repo_propose_edits", "repo_apply_edits"}
+                        and HUMAN_MESSAGE_CLS is not None
+                    ):
+                        pending_humans.append(
+                            HUMAN_MESSAGE_CLS(
+                                content=_build_context_conflict_hint(result)
+                            )
+                        )
                     if error_code == last_error_code:
                         same_error_count += 1
                     else:
@@ -253,13 +283,18 @@ def build_patch_agent_graph(llm: Any, *, repo_path: Path, max_iterations: int = 
         if SYSTEM_MESSAGE_CLS is not None:
             messages.append(
                 SYSTEM_MESSAGE_CLS(
-                    content=f"run_checks result: {json.dumps(raw_result, ensure_ascii=False)}"
+                    content=(
+                        "run_checks result: "
+                        f"{_summarize_check_results_for_llm(results, checks_ok=checks_ok)}"
+                    )
                 )
             )
         if not checks_ok:
             messages.append(HUMAN_MESSAGE_CLS(content=_format_check_failure(results)))
         next_iterations = state["iterations"] + (0 if checks_ok else 1)
-        force_final = checks_ok or next_iterations >= state["max_iterations"]
+        # Successful checks do not force-stop the loop: the model may still have
+        # pending tool calls (e.g. missed docs update in the same issue).
+        force_final = next_iterations >= state["max_iterations"]
         return {
             "messages": _trim_messages(messages),
             "check_results": state.get("check_results", []) + results,
@@ -271,6 +306,7 @@ def build_patch_agent_graph(llm: Any, *, repo_path: Path, max_iterations: int = 
         }
 
     def has_tool_calls(state: AgentState) -> bool:
+        # Global stop switch used by guardrails (tool limit, repeated hard failures).
         if state.get("force_final"):
             return False
         last = state["messages"][-1]
@@ -310,6 +346,8 @@ def run_patch_agent(
     system_prompt = _system_prompt()
     user_prompt = _issue_prompt(issue)
     settings = get_settings()
+    max_patch_attempts = int(getattr(settings, "agent_max_patch_attempts", 4))
+    max_tool_calls_per_turn = int(getattr(settings, "tool_max_calls_per_turn", 6))
     state: AgentState = {
         "messages": [
             SYSTEM_MESSAGE_CLS(content=system_prompt),
@@ -319,10 +357,10 @@ def run_patch_agent(
         "iterations": 0,
         "max_iterations": max_iterations,
         "patch_attempts": 0,
-        "max_patch_attempts": 4,
+        "max_patch_attempts": max(0, max_patch_attempts),
         "tool_turns": 0,
         "max_tool_turns": max(6, max_iterations * 4),
-        "max_tool_calls_per_turn": settings.tool_max_calls_per_turn,
+        "max_tool_calls_per_turn": max(1, max_tool_calls_per_turn),
         "apply_done": False,
         "checks_done": False,
         "checks_ok": False,
@@ -331,6 +369,7 @@ def run_patch_agent(
         "last_error_code": None,
         "same_error_count": 0,
         "max_same_error": 3,
+        "tool_overview_logged": False,
     }
     return cast(AgentState, graph.invoke(state))
 
@@ -464,23 +503,48 @@ def _parse_check_results(payload: object) -> tuple[list[CheckResult], bool]:
     return results, explicit_ok and computed_ok
 
 
-def _format_check_failure(results: list[CheckResult]) -> str:
+def _format_check_failure(
+    results: list[CheckResult], *, max_log_chars: int = 1500
+) -> str:
     lines = ["Checks failed. Logs:"]
-    for res in results:
+    failed = [item for item in results if item.exit_code != 0]
+    if not failed:
+        return "Checks failed."
+    for res in failed:
         status = "ok" if res.exit_code == 0 else f"exit={res.exit_code}"
         lines.append(f"\n$ {res.command} [{status}]")
         if res.stdout:
-            lines.append(f"stdout:\n{res.stdout}")
+            lines.append(f"stdout:\n{_truncate_text_tail(res.stdout, max_log_chars)}")
         if res.stderr:
-            lines.append(f"stderr:\n{res.stderr}")
+            lines.append(f"stderr:\n{_truncate_text_tail(res.stderr, max_log_chars)}")
     return "\n".join(lines)
 
 
+def _summarize_check_results_for_llm(
+    results: list[CheckResult], *, checks_ok: bool, max_log_chars: int = 800
+) -> str:
+    payload: dict[str, object] = {"ok": checks_ok, "results": []}
+    summarized: list[dict[str, object]] = []
+    for item in results:
+        entry: dict[str, object] = {
+            "command": item.command,
+            "exit_code": item.exit_code,
+        }
+        if item.exit_code != 0:
+            if item.stdout:
+                entry["stdout"] = _truncate_text_tail(item.stdout, max_log_chars)
+            if item.stderr:
+                entry["stderr"] = _truncate_text_tail(item.stderr, max_log_chars)
+        elif item.stdout:
+            # Keep success payload minimal to reduce token usage.
+            entry["note"] = _truncate_text_tail(item.stdout, 200)
+        summarized.append(entry)
+    payload["results"] = summarized
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _extract_first_error_code(payload: dict[str, object]) -> str | None:
-    errors = payload.get("errors")
-    if not isinstance(errors, list) or not errors:
-        return None
-    first = errors[0]
+    first = _extract_first_error(payload)
     if not isinstance(first, dict):
         return None
     code = first.get("code")
@@ -489,7 +553,57 @@ def _extract_first_error_code(payload: dict[str, object]) -> str | None:
     return None
 
 
-def _log_tool_payload(tool_defs: list[dict[str, object]]) -> None:
+def _extract_first_error(payload: dict[str, object]) -> dict[str, object] | None:
+    errors = payload.get("errors")
+    if not isinstance(errors, list) or not errors:
+        return None
+    first = errors[0]
+    if not isinstance(first, dict):
+        return None
+    return first
+
+
+def _build_context_conflict_hint(payload: dict[str, object]) -> str:
+    first = _extract_first_error(payload) or {}
+    details = first.get("details")
+    file_path = first.get("file_path") or first.get("path") or "unknown file"
+    op = None
+    actual_old_text: str | None = None
+    if isinstance(details, dict):
+        raw_op = details.get("op")
+        if isinstance(raw_op, str) and raw_op:
+            op = raw_op
+        raw_actual = details.get("actual_old_text")
+        if isinstance(raw_actual, str) and raw_actual:
+            actual_old_text = raw_actual
+    op_text = op or "edit"
+    hint = (
+        f"Detected context_conflict for {file_path} ({op_text}). "
+        "Retry with fresh context: read the relevant file/range again via repo_read_file, "
+        "then re-run repo_propose_edits. "
+        "Set expected_old_text to details.actual_old_text from the last tool error "
+        "exactly (character-for-character, including whitespace and newlines). "
+        "Do not paraphrase, trim, or reformat this text."
+    )
+    if not actual_old_text:
+        return hint
+    if len(actual_old_text) > 3000:
+        return (
+            hint
+            + " actual_old_text is too long to inline; copy it directly from the last "
+            "tool error payload."
+        )
+    return (
+        hint
+        + "\n\nReuse this exact value:\n<actual_old_text>\n"
+        + actual_old_text
+        + "\n</actual_old_text>"
+    )
+
+
+def _log_tool_payload(
+    tool_defs: list[dict[str, object]], *, first_tool_overview: bool
+) -> None:
     names: list[str] = []
     for tool in tool_defs:
         function = tool.get("function")
@@ -497,11 +611,18 @@ def _log_tool_payload(tool_defs: list[dict[str, object]]) -> None:
             name = function.get("name")
             if isinstance(name, str):
                 names.append(name)
-    LOG.info(
-        "LLM tools: count=%s names=%s tool_choice=auto",
-        len(tool_defs),
-        names,
-    )
+    if first_tool_overview:
+        LOG.info(
+            "LLM tools: count=%s names=%s tool_choice=auto",
+            len(tool_defs),
+            names,
+        )
+    else:
+        LOG.debug(
+            "LLM tools: count=%s names=%s tool_choice=auto",
+            len(tool_defs),
+            names,
+        )
     summary: list[dict[str, object]] = []
     for tool in tool_defs:
         function = tool.get("function")
@@ -515,7 +636,7 @@ def _log_tool_payload(tool_defs: list[dict[str, object]]) -> None:
                 "parameters": _summarize_schema(params),
             }
         )
-    LOG.info("LLM tool schemas: %s", json.dumps(summary, ensure_ascii=False))
+    LOG.debug("LLM tool schemas: %s", json.dumps(summary, ensure_ascii=False))
     if LOG.isEnabledFor(logging.DEBUG):
         LOG.debug(
             "LLM tool definitions JSON: %s", json.dumps(tool_defs, ensure_ascii=False)
@@ -540,7 +661,7 @@ def _log_messages(messages: list[Any]) -> None:
                 "extra_keys": extra_keys,
             }
         )
-    LOG.info("LLM messages summary: %s", summary)
+    LOG.debug("LLM messages summary: %s", summary)
 
 
 def _log_response(response: Any) -> None:
@@ -562,6 +683,24 @@ def _log_repo_propose_errors(tool_name: str, result: dict[str, object]) -> None:
         code = first.get("code")
         message = first.get("message")
         file_path = first.get("file_path") or first.get("path")
+        details = first.get("details")
+        expected_short: str | None = None
+        actual_short: str | None = None
+        if isinstance(details, dict):
+            expected_short = _shorten_log_text(details.get("expected_old_text"))
+            actual_short = _shorten_log_text(details.get("actual_old_text"))
+        if expected_short is not None or actual_short is not None:
+            LOG.warning(
+                "%s errors: count=%s first_code=%s first_message=%s file=%s expected_old_text=%s actual_old_text=%s",
+                tool_name,
+                len(errors),
+                code,
+                message,
+                file_path,
+                expected_short,
+                actual_short,
+            )
+            return
         LOG.warning(
             "%s errors: count=%s first_code=%s first_message=%s file=%s",
             tool_name,
@@ -601,19 +740,25 @@ def _trim_messages(
     *,
     max_messages: int = 40,
     max_tool_chars: int = 4000,
+    max_check_message_chars: int = 4000,
 ) -> list[Any]:
     if max_messages > 0 and len(messages) > max_messages:
         messages = _trim_messages_preserve_tools(messages, max_messages=max_messages)
     for msg in messages:
-        if not hasattr(msg, "tool_call_id"):
-            continue
         content = getattr(msg, "content", None)
         if not isinstance(content, str):
             continue
-        if max_tool_chars <= 0 or len(content) <= max_tool_chars:
+        trimmed: str | None = None
+        if hasattr(msg, "tool_call_id"):
+            if max_tool_chars <= 0 or len(content) <= max_tool_chars:
+                continue
+            trimmed = _truncate_text_tail(content, max_tool_chars)
+        elif _is_check_log_message(content):
+            if max_check_message_chars <= 0 or len(content) <= max_check_message_chars:
+                continue
+            trimmed = _truncate_text_tail(content, max_check_message_chars)
+        if trimmed is None:
             continue
-        prefix = f"[truncated {len(content) - max_tool_chars} chars]\n"
-        trimmed = prefix + content[-max_tool_chars:]
         try:
             msg.content = trimmed
         except Exception:
@@ -700,3 +845,27 @@ def _summarize_schema(schema: object) -> object:
     if "minItems" in schema:
         summary["minItems"] = schema.get("minItems")
     return summary
+
+
+def _is_check_log_message(content: str) -> bool:
+    return (
+        content.startswith("run_checks result:")
+        or content.startswith("run_checks summary:")
+        or content.startswith("Checks failed. Logs:")
+    )
+
+
+def _shorten_log_text(value: object, *, max_chars: int = 220) -> str | None:
+    if not isinstance(value, str):
+        return None
+    escaped = value.replace("\r", "\\r").replace("\n", "\\n")
+    if len(escaped) <= max_chars:
+        return escaped
+    return f"{escaped[:max_chars]}...[truncated]"
+
+
+def _truncate_text_tail(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    dropped = len(text) - max_chars
+    return f"[truncated {dropped} chars]\n{text[-max_chars:]}"

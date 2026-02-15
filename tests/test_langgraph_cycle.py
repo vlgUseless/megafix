@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_core.agents.code_agent_base import IssueContext
 from agent_core.orchestrator import langgraph_cycle as cycle
+from agent_core.schemas import IssueContext
 
 langgraph = pytest.importorskip("langgraph")
 pytest.importorskip("langchain_core")
@@ -101,7 +101,7 @@ def test_langgraph_loop_checks_retry(monkeypatch, tmp_path):
     assert apply_calls == 2
     assert check_calls == 2
     assert state["checks_ok"] is True
-    assert state["force_final"] is True
+    assert state["force_final"] is False
 
 
 def test_langgraph_limits_tool_calls(monkeypatch, tmp_path):
@@ -160,7 +160,7 @@ def test_langgraph_limits_tool_calls(monkeypatch, tmp_path):
         llm, IssueContext(number=1, title="T", body=""), repo_path=tmp_path
     )
     assert calls == ["apply"]
-    assert state["force_final"] is True
+    assert state["force_final"] is False
     message_texts = [
         text
         for text in (getattr(msg, "content", None) for msg in state["messages"])
@@ -317,6 +317,77 @@ def test_langgraph_runs_checks_after_repo_apply_edits(monkeypatch, tmp_path):
     assert state["checks_ok"] is True
 
 
+def test_langgraph_allows_tool_calls_after_successful_checks(monkeypatch, tmp_path):
+    apply_calls = 0
+    propose_calls = 0
+    check_calls = 0
+
+    def repo_apply_edits_stub(args, repo_path=None):
+        nonlocal apply_calls
+        apply_calls += 1
+        return {"applied": True, "errors": [], "stats": None}
+
+    def repo_propose_edits_stub(args, repo_path=None):
+        nonlocal propose_calls
+        propose_calls += 1
+        return {"accepted": True, "errors": [], "stats": None, "patches": []}
+
+    def run_checks_stub(args, repo_path=None):
+        nonlocal check_calls
+        check_calls += 1
+        return {
+            "ok": True,
+            "results": [
+                {
+                    "command": "pytest",
+                    "exit_code": 0,
+                    "stdout": "",
+                    "stderr": "",
+                }
+            ],
+        }
+
+    def get_handler(name: str):
+        if name == "repo_apply_edits":
+            return repo_apply_edits_stub
+        if name == "repo_propose_edits":
+            return repo_propose_edits_stub
+        if name == "run_checks":
+            return run_checks_stub
+        return lambda *args, **kwargs: {}
+
+    monkeypatch.setattr(cycle, "get_tool_handler", get_handler)
+    monkeypatch.setattr(cycle, "get_tool_definitions", lambda: [])
+    monkeypatch.setattr(
+        cycle,
+        "get_settings",
+        lambda: SimpleNamespace(tool_max_calls_per_turn=2),
+    )
+
+    responses = [
+        FakeMessage(
+            "",
+            tool_calls=[{"name": "repo_apply_edits", "args": {"edits": []}, "id": "1"}],
+        ),
+        FakeMessage(
+            "",
+            tool_calls=[
+                {"name": "repo_propose_edits", "args": {"edits": []}, "id": "2"}
+            ],
+        ),
+        FakeMessage("final", tool_calls=[]),
+    ]
+    llm = FakeLLM(responses)
+    state = cycle.run_patch_agent(
+        llm, IssueContext(number=1, title="T", body=""), repo_path=tmp_path
+    )
+    assert apply_calls == 1
+    assert check_calls == 1
+    assert propose_calls == 1
+    assert state["checks_ok"] is True
+    assert state["force_final"] is False
+
+
 def test_langgraph_counts_repo_propose_edits_failures(monkeypatch, tmp_path):
     propose_calls = 0
 
@@ -360,3 +431,71 @@ def test_langgraph_counts_repo_propose_edits_failures(monkeypatch, tmp_path):
     )
     assert propose_calls == 4
     assert state["force_final"] is True
+
+
+def test_langgraph_does_not_count_context_conflict_towards_patch_limit(
+    monkeypatch, tmp_path
+):
+    propose_calls = 0
+
+    def repo_propose_edits_stub(args, repo_path=None):
+        nonlocal propose_calls
+        propose_calls += 1
+        return {
+            "accepted": False,
+            "errors": [{"code": "context_conflict", "message": "mismatch"}],
+            "stats": None,
+            "patches": [],
+        }
+
+    def get_handler(name: str):
+        if name == "repo_propose_edits":
+            return repo_propose_edits_stub
+        if name == "run_checks":
+            return lambda *args, **kwargs: {"ok": True, "results": []}
+        return lambda *args, **kwargs: {}
+
+    monkeypatch.setattr(cycle, "get_tool_handler", get_handler)
+    monkeypatch.setattr(cycle, "get_tool_definitions", lambda: [])
+    monkeypatch.setattr(
+        cycle,
+        "get_settings",
+        lambda: SimpleNamespace(tool_max_calls_per_turn=2),
+    )
+
+    responses = [
+        FakeMessage(
+            "",
+            tool_calls=[
+                {"name": "repo_propose_edits", "args": {"edits": []}, "id": str(i)}
+            ],
+        )
+        for i in range(5)
+    ] + [FakeMessage("final", tool_calls=[])]
+
+    llm = FakeLLM(responses)
+    state = cycle.run_patch_agent(
+        llm, IssueContext(number=1, title="T", body=""), repo_path=tmp_path
+    )
+    assert propose_calls == 5
+    assert state["patch_attempts"] == 0
+
+
+def test_build_context_conflict_hint_includes_actual_old_text():
+    hint = cycle._build_context_conflict_hint(
+        {
+            "errors": [
+                {
+                    "code": "context_conflict",
+                    "path": "main.py",
+                    "details": {
+                        "op": "replace_range",
+                        "actual_old_text": 'return {"status": "ok"}\n',
+                    },
+                }
+            ]
+        }
+    )
+    assert "Set expected_old_text to details.actual_old_text" in hint
+    assert "<actual_old_text>" in hint
+    assert 'return {"status": "ok"}' in hint

@@ -25,9 +25,17 @@ def test_structured_edit_contract_supports_expected_operations() -> None:
     assert ops == {"replace_range", "insert_after", "delete_range", "create_file"}
 
 
-def test_structured_edit_contract_requires_all_fields_for_strict_mode() -> None:
+def test_structured_edit_contract_requires_all_fields() -> None:
     item_schema = REPO_EDITS_INPUT_SCHEMA["properties"]["edits"]["items"]
-    assert set(item_schema["required"]) == set(item_schema["properties"].keys())
+    assert set(item_schema["required"]) == {
+        "path",
+        "op",
+        "start_line",
+        "end_line",
+        "line",
+        "new_text",
+        "expected_old_text",
+    }
 
 
 def test_structured_edit_contract_marks_op_specific_fields_nullable() -> None:

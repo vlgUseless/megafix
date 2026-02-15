@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_core.agents.code_agent_base import IssueContext
 from agent_core.orchestrator import run_issue_graph
+from agent_core.schemas import IssueContext
 from agent_core.settings import get_settings
 
 
@@ -40,6 +40,30 @@ def test_run_issue_graph_smoke(monkeypatch, tmp_path) -> None:
     assert result.final_message == "final summary"
     assert result.checks_ok is True
     assert result.iterations == 2
+
+
+def test_extract_final_message_ignores_internal_check_logs() -> None:
+    class HumanMessage:
+        def __init__(self, content: str):
+            self.content = content
+
+    class SystemMessage:
+        def __init__(self, content: str):
+            self.content = content
+
+    class AIMessage:
+        def __init__(self, content: str):
+            self.content = content
+
+    messages = [
+        HumanMessage("Issue #1"),
+        SystemMessage('run_checks result: {"ok": true, "results": []}'),
+        AIMessage("Implemented requested changes."),
+    ]
+    assert (
+        run_issue_graph._extract_final_message(messages)
+        == "Implemented requested changes."
+    )
 
 
 def test_run_issue_graph_integration(tmp_path, monkeypatch) -> None:

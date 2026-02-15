@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import time
 import uuid
@@ -11,12 +12,23 @@ from git import Repo
 from agent_core.github_client import RepoInfo
 
 LOG = logging.getLogger(__name__)
+_TOKEN_URL_RE = re.compile(r"(x-access-token:)[^@]+@")
 
 
 def run_git(repo_path: Path, *args: str) -> None:
     cmd = ["git", "-C", str(repo_path), *args]
-    LOG.debug("Running git: %s", " ".join(cmd))
+    LOG.debug("Running git: %s", " ".join(_redact_cmd(cmd)))
     subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+
+def _redact_cmd(cmd: list[str]) -> list[str]:
+    redacted: list[str] = []
+    for arg in cmd:
+        if "x-access-token:" in arg and "@github.com" in arg:
+            redacted.append(_TOKEN_URL_RE.sub(r"\1***@", arg))
+            continue
+        redacted.append(arg)
+    return redacted
 
 
 def prepare_repo(

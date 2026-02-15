@@ -236,6 +236,31 @@ def test_apply_edits_accepts_strict_nullable_contract_shape(tmp_path: Path) -> N
     assert (tmp_path / "strict.txt").read_text(encoding="utf-8") == "a\nx\nb\n"
 
 
+def test_apply_edits_insert_after_tolerates_non_null_range_fields(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "insert.txt", "a\nb\n")
+    edits = [
+        {
+            "path": "insert.txt",
+            "op": "insert_after",
+            "start_line": 1,
+            "end_line": 1,
+            "line": 1,
+            "new_text": "x\n",
+            "expected_old_text": "a\n",
+        }
+    ]
+
+    result = apply_edits(edits, repo_path=tmp_path)
+
+    assert result.ok is True
+    assert result.applied is True
+    assert not result.errors
+    assert result.operation_results[0].status == "applied"
+    assert (tmp_path / "insert.txt").read_text(encoding="utf-8") == "a\nx\nb\n"
+
+
 def test_apply_edits_rejects_create_file_when_disabled(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -333,3 +358,74 @@ def test_build_unified_diff_marks_missing_eof_newline() -> None:
 
     assert "diff --git a/README.md b/README.md" in patch
     assert "\\ No newline at end of file" in patch
+
+
+def test_apply_edits_tolerates_expected_text_without_trailing_newline(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "main.py", "from fastapi import FastAPI\napp = FastAPI()\n")
+    edits = [
+        {
+            "path": "main.py",
+            "op": "replace_range",
+            "start_line": 1,
+            "end_line": 1,
+            "new_text": "from fastapi import FastAPI\nfrom os import getenv\n",
+            "expected_old_text": "from fastapi import FastAPI",
+        }
+    ]
+
+    result = apply_edits(edits, repo_path=tmp_path)
+
+    assert result.ok is True
+    assert result.applied is True
+    assert not result.errors
+    updated = (tmp_path / "main.py").read_text(encoding="utf-8")
+    assert "from os import getenv" in updated
+
+
+def test_apply_edits_relocates_range_when_expected_block_is_unique(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "main.py", "a\nb\nc\n")
+    edits = [
+        {
+            "path": "main.py",
+            "op": "replace_range",
+            "start_line": 3,
+            "end_line": 3,
+            "new_text": "B\n",
+            "expected_old_text": "b\n",
+        }
+    ]
+
+    result = apply_edits(edits, repo_path=tmp_path)
+
+    assert result.ok is True
+    assert result.applied is True
+    assert not result.errors
+    assert (tmp_path / "main.py").read_text(encoding="utf-8") == "a\nB\nc\n"
+
+
+def test_apply_edits_does_not_relocate_when_expected_block_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "main.py", "x\nb\nb\n")
+    edits = [
+        {
+            "path": "main.py",
+            "op": "replace_range",
+            "start_line": 1,
+            "end_line": 1,
+            "new_text": "X\n",
+            "expected_old_text": "b\n",
+        }
+    ]
+
+    result = apply_edits(edits, repo_path=tmp_path)
+
+    assert result.ok is False
+    assert result.applied is False
+    assert result.errors
+    assert result.errors[0].code == "context_conflict"
+    assert (tmp_path / "main.py").read_text(encoding="utf-8") == "x\nb\nb\n"

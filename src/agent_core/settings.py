@@ -86,14 +86,15 @@ class Settings:
     llm_service_timeout_sec: int
     llm_service_model: str | None
     llm_max_tokens: int | None
-    llm_max_relevant_files: int
-    llm_max_file_bytes: int
-    llm_max_tree_entries: int
-    llm_max_deleted_lines: int
-    llm_max_deleted_ratio: float
+    agent_max_patch_attempts: int
+    review_llm_service_url: str | None
+    review_llm_service_api_key: str | None
+    review_llm_service_model: str | None
+    review_llm_max_tokens: int | None
     review_max_diff_chars: int
     review_max_patch_chars: int
     review_max_log_chars: int
+    review_max_log_download_bytes: int
     review_rerun_max_attempts: int
     patch_require_git_diff_header: bool
     patch_max_files: int
@@ -115,6 +116,22 @@ class Settings:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     load_dotenv()
+    llm_service_url = os.getenv("LLM_SERVICE_URL")
+    llm_service_api_key = os.getenv("LLM_SERVICE_API_KEY") or os.getenv(
+        "OPENAI_API_KEY"
+    )
+    llm_service_model = os.getenv("LLM_SERVICE_MODEL")
+    llm_max_tokens = _read_optional_int("LLM_MAX_TOKENS")
+    review_llm_service_url = os.getenv("REVIEW_LLM_SERVICE_URL") or llm_service_url
+    review_llm_service_api_key = (
+        os.getenv("REVIEW_LLM_SERVICE_API_KEY") or llm_service_api_key
+    )
+    review_llm_service_model = (
+        os.getenv("REVIEW_LLM_SERVICE_MODEL") or llm_service_model
+    )
+    review_llm_max_tokens = _read_optional_int("REVIEW_LLM_MAX_TOKENS")
+    if review_llm_max_tokens is None:
+        review_llm_max_tokens = llm_max_tokens
     return Settings(
         github_app_id=os.getenv("GITHUB_APP_ID"),
         github_private_key=os.getenv("GITHUB_PRIVATE_KEY"),
@@ -134,20 +151,22 @@ def get_settings() -> Settings:
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         apply_cmd=os.getenv("AGENT_APPLY_CMD"),
         review_state_db=_read_path("REVIEW_STATE_DB") or Path("review_state.db"),
-        llm_service_url=os.getenv("LLM_SERVICE_URL"),
-        llm_service_api_key=os.getenv("LLM_SERVICE_API_KEY")
-        or os.getenv("OPENAI_API_KEY"),
+        llm_service_url=llm_service_url,
+        llm_service_api_key=llm_service_api_key,
         llm_service_timeout_sec=_read_int("LLM_SERVICE_TIMEOUT_SEC", 60),
-        llm_service_model=os.getenv("LLM_SERVICE_MODEL"),
-        llm_max_tokens=_read_optional_int("LLM_MAX_TOKENS"),
-        llm_max_relevant_files=_read_int("LLM_MAX_RELEVANT_FILES", 12),
-        llm_max_file_bytes=_read_int("LLM_MAX_FILE_BYTES", 50_000),
-        llm_max_tree_entries=_read_int("LLM_MAX_TREE_ENTRIES", 5_000),
-        llm_max_deleted_lines=_read_int("LLM_MAX_DELETED_LINES", 200),
-        llm_max_deleted_ratio=_read_float("LLM_MAX_DELETED_RATIO", 0.3),
+        llm_service_model=llm_service_model,
+        llm_max_tokens=llm_max_tokens,
+        agent_max_patch_attempts=max(0, _read_int("AGENT_MAX_PATCH_ATTEMPTS", 4)),
+        review_llm_service_url=review_llm_service_url,
+        review_llm_service_api_key=review_llm_service_api_key,
+        review_llm_service_model=review_llm_service_model,
+        review_llm_max_tokens=review_llm_max_tokens,
         review_max_diff_chars=_read_int("REVIEW_MAX_DIFF_CHARS", 120_000),
         review_max_patch_chars=_read_int("REVIEW_MAX_PATCH_CHARS", 6_000),
         review_max_log_chars=_read_int("REVIEW_MAX_LOG_CHARS", 4_000),
+        review_max_log_download_bytes=_read_int(
+            "REVIEW_MAX_LOG_DOWNLOAD_BYTES", 2_000_000
+        ),
         review_rerun_max_attempts=_read_int("REVIEW_RERUN_MAX_ATTEMPTS", 5),
         patch_require_git_diff_header=_read_bool("PATCH_REQUIRE_GIT_DIFF_HEADER", True),
         patch_max_files=_read_int("PATCH_MAX_FILES", 50),

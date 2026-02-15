@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class ReviewResult:
-    summary: str
-    approve: bool
+class IssueContext:
+    number: int
+    title: str
+    body: str | None

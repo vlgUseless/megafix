@@ -25,7 +25,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["agent_cli", "reviewer_agent"]
+known-first-party = ["megafix"]
 
 [tool.mypy]
 python_version = "3.13"
@@ -75,7 +75,7 @@ dependencies = [
 ]
 
 [project.scripts]
-megafix = "agent_cli.cli:main"
+megafix = "megafix.interfaces.cli:main"
 
 [dependency-groups]
 dev = [

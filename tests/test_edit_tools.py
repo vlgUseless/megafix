@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_core.settings import get_settings
-from agent_core.tools.edit_tools import repo_apply_edits, repo_propose_edits
+from megafix.code_agent.edit_tools import repo_apply_edits, repo_propose_edits
+from megafix.shared.settings import get_settings
 
 
 def _init_repo(path: Path) -> None:

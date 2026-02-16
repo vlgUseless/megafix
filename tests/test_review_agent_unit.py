@@ -1,10 +1,10 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agent_core.llm import LLMServiceError, summarize_review
-from agent_core.settings import get_settings
-from reviewer_agent.actions_logs import get_workflow_runs_and_logs
-from reviewer_agent.review_agent import review_pull_request
+from megafix.infra.llm_clients import LLMServiceError, summarize_review
+from megafix.review_agent.actions_logs import get_workflow_runs_and_logs
+from megafix.review_agent.application import review_pull_request
+from megafix.shared.settings import get_settings
 
 
 class FakeJob:
@@ -55,7 +55,7 @@ def test_actions_logs_collects_failed_job_logs():
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    with patch("reviewer_agent.actions_logs.requests.get") as rg:
+    with patch("megafix.review_agent.actions_logs.requests.get") as rg:
         rg.return_value = _Response()
 
         got_runs, failed_logs = get_workflow_runs_and_logs(repo, pr, token="t")
@@ -72,7 +72,7 @@ def test_review_agent_stub_comment():
     )
     issue = SimpleNamespace(number=10, title="Test issue")
     with patch(
-        "reviewer_agent.review_agent.summarize_review",
+        "megafix.review_agent.application.summarize_review",
         side_effect=LLMServiceError("boom"),
     ):
         comment, approve, verdict = review_pull_request(
@@ -95,7 +95,7 @@ def test_review_agent_normalizes_summary_verdict_line():
     issue = SimpleNamespace(number=1, title="Test issue")
     llm_summary = "**Summary**\n" "- Looks good.\n\n" "**Verdict**\n" "approve\n"
     with patch(
-        "reviewer_agent.review_agent.summarize_review", return_value=llm_summary
+        "megafix.review_agent.application.summarize_review", return_value=llm_summary
     ):
         comment, _, verdict = review_pull_request(
             pr, issue, workflow_runs=[], failed_job_logs={}
@@ -133,7 +133,7 @@ def test_summarize_review_uses_default_llm_config_for_reviewer(monkeypatch):
         captured["timeout"] = timeout
         return _Response()
 
-    with patch("agent_core.llm.requests.post", side_effect=_fake_post):
+    with patch("megafix.infra.llm_clients.requests.post", side_effect=_fake_post):
         summary = summarize_review(
             "diff", {"runs": []}, {"number": 1, "title": "Issue"}
         )
@@ -173,7 +173,7 @@ def test_summarize_review_uses_reviewer_llm_overrides(monkeypatch):
         captured["timeout"] = timeout
         return _Response()
 
-    with patch("agent_core.llm.requests.post", side_effect=_fake_post):
+    with patch("megafix.infra.llm_clients.requests.post", side_effect=_fake_post):
         summary = summarize_review(
             "diff", {"runs": []}, {"number": 1, "title": "Issue"}
         )

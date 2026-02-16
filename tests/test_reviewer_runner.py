@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from reviewer_agent import runner
+from megafix.review_agent import runner
 
 
 def test_maybe_rerun_code_agent_enqueues_feedback(monkeypatch) -> None:

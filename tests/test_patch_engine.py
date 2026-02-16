@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_core.patch_engine import PatchPolicy, apply_patches
+from megafix.code_agent.patches_engine import PatchPolicy, apply_patches
 
 
 def _init_repo(path: Path) -> None:

@@ -4,9 +4,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-from agent_core import runner
-from agent_core.github_client import RepoInfo
-from agent_core.orchestrator.run_issue_graph import CodeAgentResultV2
+from megafix.code_agent.application import CodeAgentResultV2
+from megafix.infra.github_client import RepoInfo
+from megafix.interfaces import workers as runner
 
 
 def _setup_common_runner_mocks(monkeypatch, tmp_path: Path, *, checks_ok: bool) -> None:

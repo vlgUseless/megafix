@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_core.orchestrator import run_issue_graph
-from agent_core.schemas import IssueContext
-from agent_core.settings import get_settings
+from megafix.code_agent import application as run_issue_graph
+from megafix.shared.schemas import IssueContext
+from megafix.shared.settings import get_settings
 
 
 class DummyMessage:
@@ -139,7 +139,7 @@ def test_run_issue_graph_integration(tmp_path, monkeypatch) -> None:
     fake_llm = FakeLLM(responses)
 
     captured: dict[str, object] = {}
-    from agent_core.orchestrator import langgraph_cycle as cycle
+    from megafix.code_agent import orchestration as cycle
 
     def wrapped_run_patch_agent(llm, issue, repo_path):
         state = cycle.run_patch_agent(llm, issue, repo_path=repo_path)

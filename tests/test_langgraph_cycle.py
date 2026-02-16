@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_core.orchestrator import langgraph_cycle as cycle
-from agent_core.schemas import IssueContext
+from megafix.code_agent import orchestration as cycle
+from megafix.shared.schemas import IssueContext
 
 langgraph = pytest.importorskip("langgraph")
 pytest.importorskip("langchain_core")

@@ -3,8 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from agent_core.settings import get_settings
-from agent_core.tools import check_tools
+from megafix.code_agent import check_tools
+from megafix.shared.settings import get_settings
 
 
 def test_run_checks_rejects_shell_operators(monkeypatch, tmp_path: Path) -> None:

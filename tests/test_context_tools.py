@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_core.settings import get_settings
-from agent_core.tools.context_tools import repo_grep, repo_list_files, repo_read_file
+from megafix.code_agent.context_tools import repo_grep, repo_list_files, repo_read_file
+from megafix.shared.settings import get_settings
 
 
 def _init_repo(path: Path) -> None:
@@ -33,7 +33,7 @@ def test_repo_list_files(tmp_path: Path) -> None:
 
 def test_repo_grep(tmp_path: Path, monkeypatch) -> None:
     _add_file(tmp_path, "notes.txt", "alpha\nbeta\nalpha\n")
-    monkeypatch.setattr("agent_core.tools.context_tools.shutil.which", lambda _: None)
+    monkeypatch.setattr("megafix.code_agent.context_tools.shutil.which", lambda _: None)
     payload = {"query": "alpha", "max_results": 1}
     matches = repo_grep(payload, repo_path=tmp_path)
     assert len(matches) == 1
@@ -58,8 +58,8 @@ def test_repo_grep_uses_rg_json(monkeypatch, tmp_path: Path) -> None:
 
         return Result()
 
-    monkeypatch.setattr("agent_core.tools.context_tools.shutil.which", lambda _: "rg")
-    monkeypatch.setattr("agent_core.tools.context_tools.subprocess.run", fake_run)
+    monkeypatch.setattr("megafix.code_agent.context_tools.shutil.which", lambda _: "rg")
+    monkeypatch.setattr("megafix.code_agent.context_tools.subprocess.run", fake_run)
     matches = repo_grep({"query": "hello"}, repo_path=tmp_path)
     assert matches == [{"path": "src/app.py", "line_no": 1, "line": "print('hello')"}]
 

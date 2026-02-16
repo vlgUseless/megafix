@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_core.edit_engine import _build_unified_diff, apply_edits, check_edits
-from agent_core.settings import get_settings
+from megafix.code_agent.edits_engine import (
+    _build_unified_diff,
+    apply_edits,
+    check_edits,
+)
+from megafix.shared.settings import get_settings
 
 
 def _write(path: Path, rel_path: str, content: str) -> None:

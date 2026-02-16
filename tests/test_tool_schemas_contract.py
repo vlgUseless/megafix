@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent_core.schemas.tool_schemas import (
+from megafix.shared.tool_schemas import (
     REPO_APPLY_EDITS_RESULT_SCHEMA,
     REPO_EDITS_INPUT_SCHEMA,
     REPO_PROPOSE_EDITS_RESULT_SCHEMA,

@@ -50,13 +50,14 @@ def review_pr(pr_url: str = typer.Option(..., "--pr-url")) -> None:
     workflow_runs, failed_job_logs = get_workflow_runs_and_logs(
         repository, pull_request, token=token
     )
-    review_comment, approve, verdict = review_pull_request(
+    review_comment, approve, verdict, has_blocking_findings = review_pull_request(
         pull_request, issue, workflow_runs, failed_job_logs
     )
 
     typer.echo(review_comment)
     typer.echo(f"\nApprove: {approve}")
     typer.echo(f"Verdict: {verdict or 'n/a'}")
+    typer.echo(f"Blocking findings: {has_blocking_findings}")
 
 
 @app.command("apply-patches")

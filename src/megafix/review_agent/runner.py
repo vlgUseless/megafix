@@ -181,7 +181,7 @@ def handle_review_job(
             target_head_sha,
             run_id,
         )
-    review_comment, approve, verdict = review_pull_request(
+    review_comment, approve, verdict, has_blocking_findings = review_pull_request(
         pull_request, issue, workflow_runs, failed_job_logs
     )
 
@@ -214,7 +214,7 @@ def handle_review_job(
 
     rerun_triggered = False
     rerun_attempts = None
-    if verdict == "request_changes" and issue_number and is_agent_issue_pr:
+    if has_blocking_findings and issue_number and is_agent_issue_pr:
         rerun_triggered, rerun_attempts = _maybe_rerun_code_agent(
             repo_full_name=repo_full_name,
             issue_number=issue_number,
@@ -222,7 +222,7 @@ def handle_review_job(
             review_key=review_state_key,
             review_feedback=review_comment,
         )
-    elif verdict == "request_changes":
+    elif has_blocking_findings:
         LOG.info(
             "Auto-rerun skipped for %s#%s: PR is not an agent issue PR.",
             repo_full_name,
@@ -237,6 +237,7 @@ def handle_review_job(
         "approve": approve,
         "review_comment": review_comment,
         "verdict": verdict,
+        "has_blocking_findings": has_blocking_findings,
         "rerun_triggered": rerun_triggered,
         "rerun_attempts": rerun_attempts,
     }

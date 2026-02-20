@@ -208,7 +208,7 @@ def test_handle_review_job_skips_when_ci_pending(monkeypatch) -> None:
         runner,
         "review_pull_request",
         lambda *_args, **_kwargs: called.__setitem__("review", True)
-        or ("", False, None),
+        or ("", False, None, False),
     )
 
     captured_head_sha: dict[str, str | None] = {"value": None}
@@ -284,7 +284,7 @@ def test_handle_review_job_request_changes_non_agent_pr_does_not_rerun(
     monkeypatch.setattr(
         runner,
         "review_pull_request",
-        lambda *_args, **_kwargs: ("review", False, "request_changes"),
+        lambda *_args, **_kwargs: ("review", False, "request_changes", True),
     )
     monkeypatch.setattr(
         runner, "create_pull_request_review", lambda *_args, **_kwargs: None
@@ -307,5 +307,6 @@ def test_handle_review_job_request_changes_non_agent_pr_does_not_rerun(
 
     assert result["ok"] is True
     assert result["verdict"] == "request_changes"
+    assert result["has_blocking_findings"] is True
     assert result["rerun_triggered"] is False
     assert rerun_called["value"] is False

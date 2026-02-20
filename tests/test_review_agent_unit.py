@@ -1,7 +1,13 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from megafix.infra.llm_clients import LLMServiceError, summarize_review
+from megafix.infra.llm_clients import (
+    LLMServiceError,
+    ReviewFinding,
+    StructuredReview,
+    summarize_review,
+)
 from megafix.review_agent.actions_logs import get_workflow_runs_and_logs
 from megafix.review_agent.application import review_pull_request
 from megafix.shared.settings import get_settings
@@ -75,16 +81,17 @@ def test_review_agent_stub_comment():
         "megafix.review_agent.application.summarize_review",
         side_effect=LLMServiceError("boom"),
     ):
-        comment, approve, verdict = review_pull_request(
+        comment, approve, verdict, has_blocking_findings = review_pull_request(
             pr, issue, workflow_runs=[], failed_job_logs={}
         )
     assert "megafix review" in comment.lower()
     assert "llm review unavailable" in comment.lower()
     assert approve is False
     assert verdict is None
+    assert has_blocking_findings is False
 
 
-def test_review_agent_normalizes_summary_verdict_line():
+def test_review_agent_structured_request_changes_verdict():
     pr = SimpleNamespace(
         number=1,
         title="Test PR",
@@ -93,16 +100,49 @@ def test_review_agent_normalizes_summary_verdict_line():
         head=SimpleNamespace(sha="abc"),
     )
     issue = SimpleNamespace(number=1, title="Test issue")
-    llm_summary = "**Summary**\n" "- Looks good.\n\n" "**Verdict**\n" "approve\n"
+    structured = StructuredReview(
+        summary=("API behavior changed.",),
+        blocking_findings=(
+            ReviewFinding(
+                title="Missing backward compatibility note",
+                details="README does not mention the breaking API change.",
+                severity="medium",
+                file="README.md",
+                line=12,
+            ),
+        ),
+        non_blocking_findings=(),
+        tests=("CI passed.",),
+        verdict="request_changes",
+    )
     with patch(
-        "megafix.review_agent.application.summarize_review", return_value=llm_summary
+        "megafix.review_agent.application.summarize_review",
+        return_value=structured,
     ):
-        comment, _, verdict = review_pull_request(
-            pr, issue, workflow_runs=[], failed_job_logs={}
+        comment, approve, verdict, has_blocking_findings = review_pull_request(
+            pr,
+            issue,
+            workflow_runs=[SimpleNamespace(conclusion="success")],
+            failed_job_logs={},
         )
-    assert verdict == "approve"
-    assert "**Verdict:** ✅ Approve" in comment
-    assert "**Verdict**\napprove" not in comment
+    assert verdict == "request_changes"
+    assert has_blocking_findings is True
+    assert approve is False
+    assert "**Verdict:** ❌ Request changes" in comment
+    assert "- [MEDIUM] Missing backward compatibility note (README.md:12):" in comment
+    assert comment.count("**Verdict:**") == 1
+
+
+def _review_payload_text(verdict: str = "approve") -> str:
+    return json.dumps(
+        {
+            "summary": ["ok"],
+            "blocking_findings": [],
+            "non_blocking_findings": [],
+            "tests": ["CI passed"],
+            "verdict": verdict,
+        }
+    )
 
 
 def test_summarize_review_uses_default_llm_config_for_reviewer(monkeypatch):
@@ -124,7 +164,7 @@ def test_summarize_review_uses_default_llm_config_for_reviewer(monkeypatch):
         text = ""
 
         def json(self):
-            return {"choices": [{"message": {"content": "ok"}}]}
+            return {"choices": [{"message": {"content": _review_payload_text()}}]}
 
     def _fake_post(url, json, headers, timeout):
         captured["url"] = url
@@ -138,7 +178,9 @@ def test_summarize_review_uses_default_llm_config_for_reviewer(monkeypatch):
             "diff", {"runs": []}, {"number": 1, "title": "Issue"}
         )
 
-    assert summary == "ok"
+    assert isinstance(summary, StructuredReview)
+    assert summary.verdict == "approve"
+    assert summary.summary == ("ok",)
     assert captured["url"] == "https://default-llm.local/v1/chat/completions"
     assert captured["json"]["model"] == "default-model"
     assert captured["json"]["max_tokens"] == 123
@@ -164,7 +206,7 @@ def test_summarize_review_uses_reviewer_llm_overrides(monkeypatch):
         text = ""
 
         def json(self):
-            return {"choices": [{"message": {"content": "ok"}}]}
+            return {"choices": [{"message": {"content": _review_payload_text()}}]}
 
     def _fake_post(url, json, headers, timeout):
         captured["url"] = url
@@ -178,7 +220,8 @@ def test_summarize_review_uses_reviewer_llm_overrides(monkeypatch):
             "diff", {"runs": []}, {"number": 1, "title": "Issue"}
         )
 
-    assert summary == "ok"
+    assert isinstance(summary, StructuredReview)
+    assert summary.verdict == "approve"
     assert captured["url"] == "https://review-llm.local/v1/chat/completions"
     assert captured["json"]["model"] == "review-model"
     assert captured["json"]["max_tokens"] == 77

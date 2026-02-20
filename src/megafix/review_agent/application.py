@@ -186,8 +186,10 @@ def _format_review_comment(
     ci_ok = bool(workflow_runs) and not failed_runs and not failed_job_logs
     if summary and has_blocking_findings:
         verdict_text = "❌ Request changes"
-    elif summary:
+    elif summary and ci_ok:
         verdict_text = "✅ Approve"
+    elif summary:
+        verdict_text = "⚠️ Manual review needed (CI failing)"
     elif ci_ok:
         verdict_text = "⚪ Manual review needed (LLM unavailable, CI passing)"
     else:

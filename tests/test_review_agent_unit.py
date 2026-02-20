@@ -133,6 +133,40 @@ def test_review_agent_structured_request_changes_verdict():
     assert comment.count("**Verdict:**") == 1
 
 
+def test_review_agent_structured_summary_with_failing_ci_not_approve():
+    pr = SimpleNamespace(
+        number=1,
+        title="Test PR",
+        get_issue_comments=lambda: [],
+        get_files=lambda: [],
+        head=SimpleNamespace(sha="abc"),
+    )
+    issue = SimpleNamespace(number=1, title="Test issue")
+    structured = StructuredReview(
+        summary=("Looks good overall.",),
+        blocking_findings=(),
+        non_blocking_findings=(),
+        tests=("Typing failed in CI.",),
+        verdict="approve",
+    )
+    with patch(
+        "megafix.review_agent.application.summarize_review",
+        return_value=structured,
+    ):
+        comment, approve, verdict, has_blocking_findings = review_pull_request(
+            pr,
+            issue,
+            workflow_runs=[SimpleNamespace(conclusion="failure")],
+            failed_job_logs={1: "typing failed"},
+        )
+
+    assert approve is False
+    assert verdict == "approve"
+    assert has_blocking_findings is False
+    assert "**Verdict:** ⚠️ Manual review needed (CI failing)" in comment
+    assert "**CI:** ❌ failing (1 runs, 1 failed, 1 failed job logs)" in comment
+
+
 def _review_payload_text(verdict: str = "approve") -> str:
     return json.dumps(
         {

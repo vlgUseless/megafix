@@ -15,6 +15,8 @@ wheels/
 
 # Environment variables
 .env
+.env.*
+!.env.example
 
 # Private keys
 *.pem
@@ -22,3 +24,6 @@ wheels/
 # Temporary files
 tmp/
 .agent_workdir/
+review_state.db
+tests/tmp_repo/
+.tmp/

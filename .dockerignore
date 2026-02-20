@@ -6,6 +6,8 @@
 .ruff_cache
 .venv
 __pycache__
+.tmp
+tmp
 *.pyc
 *.pyo
 *.pyd
@@ -21,3 +23,6 @@ build
 dist
 .idea
 .vscode
+tests
+ARCHITECTURE.md
+docs/

@@ -1,6 +1,6 @@
 import pytest
 
-from agent_cli.parsing import parse_issue_url, parse_pr_url
+from megafix.interfaces.cli_parsing import parse_issue_url, parse_pr_url
 
 
 def test_parse_issue_url_ok():

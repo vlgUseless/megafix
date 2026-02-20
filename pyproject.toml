@@ -25,7 +25,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["agent_cli", "reviewer_agent"]
+known-first-party = ["megafix"]
 
 [tool.mypy]
 python_version = "3.13"
@@ -39,12 +39,48 @@ warn_return_any = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["git", "github", "jwt", "requests"]
+module = [
+  "git",
+  "github",
+  "jwt",
+  "requests",
+  "langchain",
+  "langchain.*",
+  "langchain_core",
+  "langchain_core.*",
+  "langchain_openai",
+  "langchain_openai.*",
+  "langgraph",
+  "langgraph.*",
+]
 ignore_missing_imports = true
 
 [project]
 name = "megafix"
 version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.129.0",
+    "gitpython>=3.1.46",
+    "langchain-openai>=1.1.9",
+    "langgraph>=1.0.8",
+    "pygithub>=2.8.1",
+    "pyjwt[crypto]>=2.11.0",
+    "python-dotenv>=1.2.1",
+    "redis>=7.1.1",
+    "requests>=2.32.5",
+    "rq>=2.6.1",
+    "typer>=0.23.1",
+    "uvicorn>=0.40.0",
+]
 
 [project.scripts]
-megafix = "agent_cli.cli:main"
+megafix = "megafix.interfaces.cli:main"
+
+[dependency-groups]
+dev = [
+    "black>=26.1.0",
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "ruff>=0.15.1",
+]

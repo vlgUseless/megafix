@@ -1,16 +1,17 @@
-version: "3.9"
-
 services:
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     volumes:
       - redis_data:/data
 
   web:
     build: .
-    command: ["uvicorn", "webhook_server.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "megafix.interfaces.webhook_app:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
       - .env
     environment:
@@ -23,9 +24,10 @@ services:
       # Optional: mount private key if using file path
       # - ./path/to/private-key.pem:/run/secrets/github_private_key.pem:ro
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
   worker:
     build: .
@@ -42,7 +44,8 @@ services:
       # Optional: mount private key if using file path
       # - ./path/to/private-key.pem:/run/secrets/github_private_key.pem:ro
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
 
   smee:
     image: amplifysecurity/smee-client:latest

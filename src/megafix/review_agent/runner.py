@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from github import Github
+from github import Auth, Github
 from redis import Redis
 from rq import Queue
 
@@ -24,6 +24,15 @@ from megafix.shared.logging_setup import setup_logging
 from megafix.shared.settings import get_settings
 
 LOG = logging.getLogger(__name__)
+
+
+def _build_github_client(token: str) -> Github:
+    """Use modern PyGithub auth API with backward-compatible fallback."""
+    try:
+        return Github(auth=Auth.Token(token))
+    except TypeError:
+        # Compatibility for tests/mocks or older PyGithub signatures.
+        return Github(token)
 
 
 def _resolve_pr_number(
@@ -75,7 +84,7 @@ def handle_review_job(
     )
 
     token = get_installation_token(installation_id)
-    gh = Github(token)
+    gh = _build_github_client(token)
     repository = gh.get_repo(repo_full_name)
     if pr_number is None:
         pr_number = _resolve_pr_number(token, repo_full_name, head_sha, base_branch)

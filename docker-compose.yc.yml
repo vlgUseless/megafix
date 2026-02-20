@@ -1,0 +1,64 @@
+services:
+  web:
+    image: cr.yandex/${REGISTRY_ID}/megafix-web:${TAG}
+    expose:
+      - "8000"
+
+  worker:
+    image: cr.yandex/${REGISTRY_ID}/megafix-worker:${TAG}
+
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      - web
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      LETSENCRYPT_DOMAIN: ${LETSENCRYPT_DOMAIN:-_}
+    volumes:
+      - ./deploy/nginx/entrypoint.sh:/entrypoint.sh:ro
+      - ./deploy/nginx/templates:/etc/nginx/templates:ro
+      - certbot_www:/var/www/certbot
+      - certbot_conf:/etc/letsencrypt
+    command: ["/bin/sh", "/entrypoint.sh"]
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot:latest
+    profiles: ["ssl"]
+    volumes:
+      - certbot_www:/var/www/certbot
+      - certbot_conf:/etc/letsencrypt
+    command:
+      [
+        "certonly",
+        "--webroot",
+        "--webroot-path=/var/www/certbot",
+        "--email",
+        "${LETSENCRYPT_EMAIL:-}",
+        "--agree-tos",
+        "--no-eff-email",
+        "--non-interactive",
+        "-d",
+        "${LETSENCRYPT_DOMAIN:-}",
+      ]
+
+  certbot-renew:
+    image: certbot/certbot:latest
+    profiles: ["ssl"]
+    volumes:
+      - certbot_www:/var/www/certbot
+      - certbot_conf:/etc/letsencrypt
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      trap exit TERM;
+      while :; do
+        certbot renew --webroot --webroot-path=/var/www/certbot --quiet;
+        sleep 12h;
+      done
+    restart: unless-stopped
+
+volumes:
+  certbot_www:
+  certbot_conf:

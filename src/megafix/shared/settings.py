@@ -86,6 +86,7 @@ class Settings:
     llm_service_timeout_sec: int
     llm_service_model: str | None
     llm_max_tokens: int | None
+    agent_max_iterations: int
     agent_max_patch_attempts: int
     review_llm_service_url: str | None
     review_llm_service_api_key: str | None
@@ -156,6 +157,7 @@ def get_settings() -> Settings:
         llm_service_timeout_sec=_read_int("LLM_SERVICE_TIMEOUT_SEC", 60),
         llm_service_model=llm_service_model,
         llm_max_tokens=llm_max_tokens,
+        agent_max_iterations=max(1, _read_int("AGENT_MAX_ITERATIONS", 3)),
         agent_max_patch_attempts=max(0, _read_int("AGENT_MAX_PATCH_ATTEMPTS", 4)),
         review_llm_service_url=review_llm_service_url,
         review_llm_service_api_key=review_llm_service_api_key,

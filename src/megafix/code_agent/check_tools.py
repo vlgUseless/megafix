@@ -113,10 +113,18 @@ def run_checks(
             )
         else:
             LOG.warning(
-                "Check failed: command=%r exit_code=%s duration_sec=%.2f",
+                "Check failed: command=%r exit_code=%s duration_sec=%.2f stdout=%s stderr=%s",
                 result.command,
                 result.exit_code,
                 duration_sec,
+                _format_check_log_excerpt(
+                    result.stdout,
+                    was_truncated=result.stdout_truncated,
+                ),
+                _format_check_log_excerpt(
+                    result.stderr,
+                    was_truncated=result.stderr_truncated,
+                ),
             )
         results.append(result)
         if result.exit_code != 0:
@@ -297,6 +305,23 @@ def _coerce_text(value: object) -> str:
     if isinstance(value, str):
         return value
     return str(value)
+
+
+def _format_check_log_excerpt(
+    text: str,
+    *,
+    was_truncated: bool,
+    max_chars: int = 1500,
+) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return "<empty>"
+    if len(cleaned) > max_chars:
+        dropped = len(cleaned) - max_chars
+        cleaned = f"[truncated {dropped} chars]\n{cleaned[-max_chars:]}"
+    if was_truncated:
+        cleaned = f"{cleaned}\n[output truncated by CHECK_MAX_LOG_CHARS during capture]"
+    return cleaned
 
 
 def _normalize_command_args(args: list[str]) -> list[str]:

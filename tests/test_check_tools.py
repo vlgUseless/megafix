@@ -25,7 +25,7 @@ def test_run_checks_ignores_custom_commands_when_disabled(
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("CHECK_ALLOW_CUSTOM_COMMANDS", "0")
-    monkeypatch.delenv("AGENT_APPLY_CMD", raising=False)
+    monkeypatch.setenv("AGENT_APPLY_CMD", "")
     get_settings.cache_clear()
 
     seen: list[str] = []
@@ -123,7 +123,7 @@ def test_run_checks_treats_pytest_exit_code_5_as_success(
 def test_run_checks_defaults_are_empty_for_non_python_repo(
     monkeypatch, tmp_path: Path
 ) -> None:
-    monkeypatch.delenv("AGENT_APPLY_CMD", raising=False)
+    monkeypatch.setenv("AGENT_APPLY_CMD", "")
     get_settings.cache_clear()
 
     seen: list[str] = []
@@ -151,7 +151,7 @@ def test_run_checks_defaults_are_empty_for_non_python_repo(
 def test_run_checks_defaults_detect_pytest_and_ruff(
     monkeypatch, tmp_path: Path
 ) -> None:
-    monkeypatch.delenv("AGENT_APPLY_CMD", raising=False)
+    monkeypatch.setenv("AGENT_APPLY_CMD", "")
     get_settings.cache_clear()
 
     tests_dir = tmp_path / "tests"

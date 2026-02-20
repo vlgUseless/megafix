@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -31,7 +32,20 @@ def run_issue_graph(
         progress_cb("Starting LangGraph patch loop.")
 
     llm = _build_llm(settings)
-    state = run_patch_agent(llm, issue, repo_path=repo_path)
+    max_iterations = _resolve_agent_max_iterations(settings)
+    if _supports_max_iterations_kwarg(run_patch_agent):
+        state = run_patch_agent(
+            llm,
+            issue,
+            repo_path=repo_path,
+            max_iterations=max_iterations,
+        )
+    else:
+        state = run_patch_agent(
+            llm,
+            issue,
+            repo_path=repo_path,
+        )
 
     final_message = _extract_final_message(state.get("messages", []))
     checks_ok = bool(state.get("checks_ok"))
@@ -66,6 +80,26 @@ def _ensure_llm_settings(settings: Settings) -> None:
         raise RuntimeError("LLM_SERVICE_API_KEY (or OPENAI_API_KEY) is not set.")
     if not settings.llm_service_model:
         raise RuntimeError("LLM_SERVICE_MODEL is not configured.")
+
+
+def _resolve_agent_max_iterations(settings: Settings, default: int = 3) -> int:
+    raw = getattr(settings, "agent_max_iterations", default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(1, value)
+
+
+def _supports_max_iterations_kwarg(func: Callable[..., object]) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return True
+    parameters = signature.parameters.values()
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters):
+        return True
+    return "max_iterations" in signature.parameters
 
 
 def _build_llm(settings: Settings) -> Any:
@@ -199,8 +233,8 @@ def _extract_summary_lines(
 def _render_check_results(check_results: object) -> list[str]:
     if not isinstance(check_results, list) or not check_results:
         return []
-    lines: list[str] = []
-    for item in check_results:
+    parsed: list[tuple[int, str, int]] = []
+    for index, item in enumerate(check_results):
         command = getattr(item, "command", None)
         exit_code = getattr(item, "exit_code", None)
         if isinstance(item, dict):
@@ -210,6 +244,19 @@ def _render_check_results(check_results: object) -> list[str]:
             continue
         if not isinstance(exit_code, int):
             continue
+        parsed.append((index, command, exit_code))
+
+    if not parsed:
+        return []
+
+    latest_by_command: dict[str, tuple[int, int]] = {}
+    for index, command, exit_code in parsed:
+        latest_by_command[command] = (index, exit_code)
+
+    lines: list[str] = []
+    for command, (_, exit_code) in sorted(
+        latest_by_command.items(), key=lambda item: item[1][0]
+    ):
         status = "passed" if exit_code == 0 else f"failed (exit {exit_code})"
         lines.append(f"- `{command}`: {status}")
     return lines

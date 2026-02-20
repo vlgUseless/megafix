@@ -65,6 +65,9 @@ class AgentState(TypedDict):
     same_error_count: int
     max_same_error: int
     tool_overview_logged: bool
+    retry_requested: bool
+    retry_requests: int
+    max_retry_requests: int
 
 
 class ToolCall(TypedDict):
@@ -84,6 +87,7 @@ def build_patch_agent_graph(llm: Any, *, repo_path: Path, max_iterations: int = 
 
     def assistant(state: AgentState) -> dict[str, object]:
         trimmed_messages = _trim_messages(state["messages"])
+        trimmed_messages = _repair_tool_history(trimmed_messages)
         first_tool_overview = not state.get("tool_overview_logged", False)
         _log_tool_payload(tool_defs, first_tool_overview=first_tool_overview)
         _log_messages(trimmed_messages)
@@ -93,16 +97,54 @@ def build_patch_agent_graph(llm: Any, *, repo_path: Path, max_iterations: int = 
             _log_llm_error(exc)
             raise
         _log_response(response)
+        response_messages = trimmed_messages + [response]
+        response_tool_calls = _extract_tool_calls(response)
+        force_final = bool(state.get("force_final"))
+        checks_failed = bool(state.get("checks_done")) and not bool(
+            state.get("checks_ok")
+        )
+        retry_requested = False
+        retry_requests = int(state.get("retry_requests", 0))
+        max_retry_requests = int(state.get("max_retry_requests", 0))
+        if not response_tool_calls and checks_failed and not force_final:
+            retry_requests += 1
+            if max_retry_requests > 0 and retry_requests > max_retry_requests:
+                force_final = True
+                LOG.warning(
+                    "Retry prompt limit reached after failed checks: %s/%s",
+                    retry_requests - 1,
+                    max_retry_requests,
+                )
+            else:
+                retry_requested = True
+                if HUMAN_MESSAGE_CLS is not None:
+                    response_messages.append(
+                        HUMAN_MESSAGE_CLS(
+                            content=_retry_hint_after_failed_checks(
+                                state.get("check_results", [])
+                            )
+                        )
+                    )
+                LOG.info(
+                    "LLM returned no tool calls after failed checks; requesting retry (%s/%s).",
+                    retry_requests,
+                    max_retry_requests if max_retry_requests > 0 else "unbounded",
+                )
+        else:
+            retry_requests = 0
         return {
-            "messages": _trim_messages(trimmed_messages + [response]),
+            "messages": _trim_messages(response_messages),
             "tool_overview_logged": True,
+            "retry_requested": retry_requested,
+            "retry_requests": retry_requests,
+            "force_final": force_final,
         }
 
     def tool_exec(state: AgentState) -> dict[str, object]:
         last = state["messages"][-1]
         tool_calls = _extract_tool_calls(last)
         if not tool_calls:
-            return {}
+            return {"retry_requested": False}
 
         messages: list[Any] = []
         pending_humans: list[Any] = []
@@ -139,6 +181,7 @@ def build_patch_agent_graph(llm: Any, *, repo_path: Path, max_iterations: int = 
             return {
                 "messages": state["messages"] + messages,
                 "force_final": True,
+                "retry_requested": False,
             }
 
         if max_calls_per_turn and len(tool_calls) > max_calls_per_turn:
@@ -273,6 +316,8 @@ def build_patch_agent_graph(llm: Any, *, repo_path: Path, max_iterations: int = 
             "last_error_code": last_error_code,
             "same_error_count": same_error_count,
             "patch_attempts": patch_attempts,
+            "retry_requested": False,
+            "retry_requests": 0,
         }
 
     def run_checks(state: AgentState) -> dict[str, object]:
@@ -309,6 +354,8 @@ def build_patch_agent_graph(llm: Any, *, repo_path: Path, max_iterations: int = 
         # Global stop switch used by guardrails (tool limit, repeated hard failures).
         if state.get("force_final"):
             return False
+        if state.get("retry_requested"):
+            return True
         last = state["messages"][-1]
         return bool(_extract_tool_calls(last))
 
@@ -370,6 +417,9 @@ def run_patch_agent(
         "same_error_count": 0,
         "max_same_error": 3,
         "tool_overview_logged": False,
+        "retry_requested": False,
+        "retry_requests": 0,
+        "max_retry_requests": max(1, max_iterations),
     }
     return cast(AgentState, graph.invoke(state))
 
@@ -520,6 +570,32 @@ def _format_check_failure(
     return "\n".join(lines)
 
 
+def _retry_hint_after_failed_checks(results: object) -> str:
+    if isinstance(results, list):
+        for item in reversed(results):
+            command = getattr(item, "command", None)
+            exit_code = getattr(item, "exit_code", None)
+            if isinstance(item, dict):
+                command = item.get("command", command)
+                exit_code = item.get("exit_code", exit_code)
+            if (
+                isinstance(command, str)
+                and isinstance(exit_code, int)
+                and exit_code != 0
+            ):
+                return (
+                    "Checks failed and no patch was proposed. "
+                    f"Last failed command: {command} (exit={exit_code}). "
+                    "Do not finalize yet. Read the failing context and call "
+                    "repo_propose_edits/repo_apply_edits to fix the failure."
+                )
+    return (
+        "Checks failed and no patch was proposed. "
+        "Do not finalize yet. Read the failing context and call "
+        "repo_propose_edits/repo_apply_edits to fix the failure."
+    )
+
+
 def _summarize_check_results_for_llm(
     results: list[CheckResult], *, checks_ok: bool, max_log_chars: int = 800
 ) -> str:
@@ -649,6 +725,14 @@ def _log_messages(messages: list[Any]) -> None:
         content = getattr(msg, "content", None)
         content_type = type(content).__name__
         content_len = len(content) if isinstance(content, str) else None
+        tool_call_id = getattr(msg, "tool_call_id", None)
+        tool_call_ids: list[str] = []
+        if not tool_call_id:
+            tool_call_ids = [
+                str(call.get("id"))
+                for call in _extract_tool_calls(msg)
+                if isinstance(call, dict) and call.get("id")
+            ]
         additional = getattr(msg, "additional_kwargs", None)
         extra_keys: list[str] | None = None
         if isinstance(additional, dict):
@@ -658,6 +742,8 @@ def _log_messages(messages: list[Any]) -> None:
                 "type": type(msg).__name__,
                 "content_type": content_type,
                 "content_len": content_len,
+                "tool_call_id": str(tool_call_id) if tool_call_id else None,
+                "tool_call_ids": tool_call_ids or None,
                 "extra_keys": extra_keys,
             }
         )
@@ -809,6 +895,64 @@ def _trim_messages_preserve_tools(
 
     trimmed = first + list(reversed(collected))
     return trimmed[-max_messages:] if len(trimmed) > max_messages else trimmed
+
+
+def _repair_tool_history(messages: list[Any]) -> list[Any]:
+    """Remove orphaned tool call/result messages to satisfy provider constraints."""
+    assistant_call_ids_by_index: dict[int, set[str]] = {}
+    tool_result_ids: set[str] = set()
+
+    for idx, msg in enumerate(messages):
+        tool_call_id = getattr(msg, "tool_call_id", None)
+        if tool_call_id:
+            tool_result_ids.add(str(tool_call_id))
+            continue
+        tool_calls = _extract_tool_calls(msg)
+        if not tool_calls:
+            continue
+        ids = {str(call.get("id")) for call in tool_calls if call.get("id")}
+        if ids:
+            assistant_call_ids_by_index[idx] = ids
+
+    if not assistant_call_ids_by_index and not tool_result_ids:
+        return messages
+
+    kept_assistant_indexes: set[int] = set()
+    kept_tool_ids: set[str] = set()
+    dropped_assistant_indexes: set[int] = set()
+
+    for idx, call_ids in assistant_call_ids_by_index.items():
+        if call_ids.issubset(tool_result_ids):
+            kept_assistant_indexes.add(idx)
+            kept_tool_ids.update(call_ids)
+        else:
+            dropped_assistant_indexes.add(idx)
+
+    removed_assistant = 0
+    removed_tools = 0
+    repaired: list[Any] = []
+    for idx, msg in enumerate(messages):
+        tool_call_id = getattr(msg, "tool_call_id", None)
+        if tool_call_id:
+            if str(tool_call_id) not in kept_tool_ids:
+                removed_tools += 1
+                continue
+            repaired.append(msg)
+            continue
+
+        if idx in dropped_assistant_indexes:
+            removed_assistant += 1
+            continue
+        repaired.append(msg)
+
+    if removed_assistant or removed_tools:
+        LOG.warning(
+            "Repaired tool history: removed_assistant_messages=%s removed_tool_messages=%s kept_tool_ids=%s",
+            removed_assistant,
+            removed_tools,
+            len(kept_tool_ids),
+        )
+    return repaired
 
 
 def _summarize_schema(schema: object) -> object:

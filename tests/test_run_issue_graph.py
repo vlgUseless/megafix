@@ -66,6 +66,30 @@ def test_extract_final_message_ignores_internal_check_logs() -> None:
     )
 
 
+def test_render_check_results_keeps_only_latest_per_command() -> None:
+    checks = [
+        {
+            "command": "uv pip install --python /app/.venv/bin/python -e . freezegun",
+            "exit_code": 0,
+        },
+        {"command": "python -m pytest -q", "exit_code": 1},
+        {
+            "command": "uv pip install --python /app/.venv/bin/python -e . freezegun",
+            "exit_code": 0,
+        },
+        {"command": "python -m pytest -q", "exit_code": 0},
+        {"command": "python -m ruff check .", "exit_code": 0},
+    ]
+
+    lines = run_issue_graph._render_check_results(checks)
+
+    assert lines == [
+        "- `uv pip install --python /app/.venv/bin/python -e . freezegun`: passed",
+        "- `python -m pytest -q`: passed",
+        "- `python -m ruff check .`: passed",
+    ]
+
+
 def test_run_issue_graph_integration(tmp_path, monkeypatch) -> None:
     pytest.importorskip("langgraph")
     pytest.importorskip("langchain_core")
@@ -74,7 +98,7 @@ def test_run_issue_graph_integration(tmp_path, monkeypatch) -> None:
     if importlib.util.find_spec("ruff") is None:
         pytest.skip("ruff not installed")
     # Keep integration deterministic: local .env commands must not affect checks.
-    monkeypatch.delenv("AGENT_APPLY_CMD", raising=False)
+    monkeypatch.setenv("AGENT_APPLY_CMD", "")
     get_settings.cache_clear()
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)

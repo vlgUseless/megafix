@@ -433,6 +433,72 @@ def test_langgraph_counts_repo_propose_edits_failures(monkeypatch, tmp_path):
     assert state["force_final"] is True
 
 
+def test_langgraph_retries_when_model_stops_after_failed_checks(monkeypatch, tmp_path):
+    apply_calls = 0
+    check_calls = 0
+
+    def repo_apply_edits_stub(args, repo_path=None):
+        nonlocal apply_calls
+        apply_calls += 1
+        return {"applied": True, "errors": [], "stats": None}
+
+    def run_checks_stub(args, repo_path=None):
+        nonlocal check_calls
+        check_calls += 1
+        ok = check_calls > 1
+        exit_code = 0 if ok else 1
+        return {
+            "ok": ok,
+            "results": [
+                {
+                    "command": "python -m pytest -q",
+                    "exit_code": exit_code,
+                    "stdout": "",
+                    "stderr": "failing test",
+                }
+            ],
+        }
+
+    def get_handler(name: str):
+        if name == "repo_apply_edits":
+            return repo_apply_edits_stub
+        if name == "run_checks":
+            return run_checks_stub
+        return lambda *args, **kwargs: {}
+
+    monkeypatch.setattr(cycle, "get_tool_handler", get_handler)
+    monkeypatch.setattr(cycle, "get_tool_definitions", lambda: [])
+    monkeypatch.setattr(
+        cycle,
+        "get_settings",
+        lambda: SimpleNamespace(tool_max_calls_per_turn=2),
+    )
+
+    responses = [
+        FakeMessage(
+            "",
+            tool_calls=[{"name": "repo_apply_edits", "args": {"edits": []}, "id": "1"}],
+        ),
+        FakeMessage("final after failed checks", tool_calls=[]),
+        FakeMessage(
+            "",
+            tool_calls=[{"name": "repo_apply_edits", "args": {"edits": []}, "id": "2"}],
+        ),
+        FakeMessage("final", tool_calls=[]),
+    ]
+    llm = FakeLLM(responses)
+    state = cycle.run_patch_agent(
+        llm,
+        IssueContext(number=1, title="T", body=""),
+        repo_path=tmp_path,
+        max_iterations=3,
+    )
+    assert apply_calls == 2
+    assert check_calls == 2
+    assert state["checks_ok"] is True
+    assert state["force_final"] is False
+
+
 def test_langgraph_does_not_count_context_conflict_towards_patch_limit(
     monkeypatch, tmp_path
 ):
@@ -499,3 +565,25 @@ def test_build_context_conflict_hint_includes_actual_old_text():
     assert "Set expected_old_text to details.actual_old_text" in hint
     assert "<actual_old_text>" in hint
     assert 'return {"status": "ok"}' in hint
+
+
+def test_repair_tool_history_drops_orphan_tool_calls():
+    system = SimpleNamespace(content="sys")
+    orphan_ai = SimpleNamespace(
+        content="call orphan",
+        tool_calls=[{"name": "repo_read_file", "args": {}, "id": "orphan-1"}],
+    )
+    valid_ai = SimpleNamespace(
+        content="call valid",
+        tool_calls=[{"name": "repo_grep", "args": {}, "id": "ok-1"}],
+    )
+    valid_tool = SimpleNamespace(content='{"ok": true}', tool_call_id="ok-1")
+    human = SimpleNamespace(content="next")
+
+    repaired = cycle._repair_tool_history(
+        [system, orphan_ai, valid_ai, valid_tool, human]
+    )
+
+    assert orphan_ai not in repaired
+    assert valid_ai in repaired
+    assert valid_tool in repaired
